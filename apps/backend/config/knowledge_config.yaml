@@ -3,7 +3,7 @@
 # Higher priority files are checked first when looking up table information.
 # Files can be added/removed and the system will adapt dynamically.
 
-version: "1.0"
+version: "2.0"
 
 # Data directory (relative to backend root)
 data_directory: "data/sample"
@@ -21,56 +21,41 @@ refresh_interval_seconds: 86400
 #   - key_fields: fields used to match tables (searched in order)
 #   - description: human-readable description
 sources:
-  - name: teradata_gcp_mapping
-    file: teradata_gcp_mapping.csv
+  # PRIMARY: UG1 Objects — Teradata-to-GCP migration status for UG1 objects
+  # 304 objects with workstream, source/target mapping, status, notes
+  - name: ug1_objects
+    file: ug1_objects.csv
     type: mapping
     priority: 100
     key_fields:
-      - legacy_table
-      - gcp_table
-      - gcp_full_path
-    description: "Primary Teradata to GCP table mapping with modernization status"
+      - TD_Object_Name
+      - GCP_Object_Name
+      - TD_Object_Reference
+      - TD_DB_Name
+    description: "UG1 object migration mapping: Teradata source to GCP target with status (Available, Deprecated, Restricted, In Development)"
 
-  - name: gcp_metadata
-    file: gcp_metadata.csv
+  # SECONDARY: Actuals — Replication tracking with modernization details
+  # 1977 rows with GCP replicated tables, BQ views, DAGs, flip dates
+  - name: actuals
+    file: actuals.csv
     type: metadata
     priority: 90
     key_fields:
-      - gcp_table
-      - gcp_full_path
-    description: "GCP BigQuery table metadata (row counts, sizes, partitioning, dates)"
+      - TD_Object_Name
+      - GCP_Replicated_Table
+      - Target_View_Name
+      - BQ_View
+      - Modernized_Table
+    description: "Replication actuals: Teradata-to-GCP tracking with flip dates, DAG schedules, modernized table references"
 
-  - name: table_status
-    file: table_status.csv
-    type: status
+  # TERTIARY: Frank Sheet — Comprehensive metadata with ownership info
+  # 5259 rows with owner, POC, priority, replication decisions, usage stats
+  - name: frank_sheet
+    file: frank_sheet.csv
+    type: inventory
     priority: 80
     key_fields:
-      - table_name
-      - gcp_full_path
-    description: "Table health status, SLA tiers, deprecation info"
-
-  - name: dag_inventory
-    file: dag_inventory.csv
-    type: inventory
-    priority: 70
-    key_fields:
-      - target_table
-    description: "Airflow DAG inventory linking pipelines to tables"
-
-  # Legacy files (kept for backward compatibility, lower priority)
-  - name: uc1_object_sheet
-    file: uc1_object_sheet.csv
-    type: mapping
-    priority: 50
-    key_fields:
-      - legacy_table
-      - gcp_table
-    description: "Legacy UC1 object sheet (superseded by teradata_gcp_mapping)"
-
-  - name: table_mapping
-    file: table_mapping.csv
-    type: status
-    priority: 40
-    key_fields:
-      - table_name
-    description: "Legacy table health mapping (superseded by table_status)"
+      - tablename
+      - TableList
+      - GCP_Reference
+    description: "Master inventory sheet with ownership (POC, org), replication decisions, load types, usage stats (read/write counts, row counts)"

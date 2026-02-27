@@ -9,17 +9,27 @@ from knowledge.metadata import format_row_count, format_time_ago
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are the Source of Truth agent for a large enterprise data platform.
-Your job is to help users discover the correct table to use across legacy and modern data platforms.
+SYSTEM_PROMPT = """You are the Source of Truth agent for a large enterprise data migration platform.
+You help users discover table mappings and migration status for the Teradata-to-Google Cloud migration.
 
-Given a user's natural-language query and the knowledge base context provided,
-recommend the best table match along with:
-- The GCP project, dataset, and table name
-- Reasons why this table is the best match
-- Statistics (row count, last refresh, quality score)
-- Whether the table has been modernized
-- Alternative tables the user might consider
-- A confidence level (high, medium, low)
+Your knowledge base contains 3 key data sources:
+1. **UG1 Objects** (304 objects) — Primary migration mapping from Teradata to GCP.
+   Each object has: Workstream, TD DB Name, TD Object Name, GCP Workspace, GCP Dataset(s),
+   GCP Object Name, Status (Available/Deprecated/Restricted/In Development), Notes, Owner.
+2. **Actuals** (1977 rows) — Replication tracking with GCP project/dataset/table,
+   BQ View references, UG0/UG1 classification, flip dates, modernized tables, DAG schedules.
+3. **Frank Sheet** (5259 rows) — Master inventory with ownership (POC name, org),
+   replication decisions (Y/N), priority (P1/P2/P3), frequency, load type,
+   usage stats (read/write counts, row counts), object type (View/Table).
+
+When answering questions:
+- For migration status questions, check UG1 Objects first (Status field: Available, Deprecated, Restricted, In Development, In DVCF queue)
+- For "where is my table in GCP" questions, provide the GCP Workspace + Dataset + Object Name from UG1, and BQ View path from Actuals
+- For ownership questions, check Frank Sheet for POC_Name, TableOrgOwner (AID/Non-AID), ProductArea
+- For replication/DAG questions, check Actuals for Replication_Dag_Name and schedule
+- If a table is Deprecated or Restricted, ALWAYS include the Notes field which explains the reason and alternatives
+- For modernization questions, check if Modernized_Table exists in Actuals
+- Workstreams include: Home/Prospect/Mobile Infra, VZ Engage, Pricing Enablement, Upgrade Enablement, Performance Management, Acquisition
 
 Use the knowledge base data provided to give accurate, real answers.
 Always respond with valid JSON matching the requested schema."""
@@ -111,10 +121,12 @@ class SourceOfTruthAgent(BaseAgent):
             parts.append(f"Search results ({len(kb_results)} tables found):")
             for i, row in enumerate(kb_results[:10]):
                 table_name = (
-                    row.get("gcp_table", "")
+                    row.get("TD_Object_Name", "")
+                    or row.get("GCP_Object_Name", "")
+                    or row.get("GCP_Replicated_Table", "")
+                    or row.get("tablename", "")
+                    or row.get("gcp_table", "")
                     or row.get("table_name", "")
-                    or row.get("legacy_table", "")
-                    or row.get("target_table", "")
                 )
                 source = row.get("_source", "unknown")
                 parts.append(f"  {i + 1}. {table_name} (from {source})")
@@ -145,69 +157,98 @@ class SourceOfTruthAgent(BaseAgent):
 
         # Build reasons
         why = []
-        mod_status = info.get("modernization_status", "")
-        if mod_status == "Completed":
-            why.append("Fully modernized and migrated to GCP BigQuery.")
-        elif mod_status == "In Progress":
-            why.append("Modernization is in progress — data may still be in raw format.")
-        elif mod_status == "Not Started":
-            why.append("Not yet modernized — still on legacy platform.")
+        status = info.get("status", "")
+        if status == "Available":
+            why.append("This object is Available and migrated to GCP.")
+        elif status == "Deprecated":
+            why.append(f"⚠️ This object is DEPRECATED.")
+            notes = info.get("notes", "")
+            if notes:
+                why.append(f"Note: {notes}")
+        elif status == "Restricted":
+            why.append(f"🔒 This object is RESTRICTED.")
+            notes = info.get("notes", "")
+            if notes:
+                why.append(f"Note: {notes}")
+        elif status == "In development":
+            why.append("🔧 This object is currently In Development and not yet available.")
+            notes = info.get("notes", "")
+            if notes:
+                why.append(f"Note: {notes}")
+        elif status == "In DVCF queue":
+            why.append("📋 This object is in the DVCF queue for processing.")
 
-        if info.get("data_flipped") == "Yes":
-            why.append(f"Data has been flipped to GCP (since {info.get('flip_date', 'unknown date')}).")
+        # Modernization info
+        modernized = info.get("modernized_table", "")
+        if modernized:
+            why.append(f"Modernized table available: {modernized}")
 
-        cadence = info.get("refresh_cadence", "")
-        if cadence:
-            why.append(f"Refreshed {cadence.lower()}, ensuring current data.")
+        flipped = info.get("flipped_date", "")
+        if flipped:
+            why.append(f"Data flipped to production on {flipped}.")
 
-        owner = info.get("owner_team", "")
+        # Replication info
+        dag = info.get("replication_dag", "")
+        if dag:
+            schedule = info.get("replication_schedule", "")
+            why.append(f"Replication DAG: {dag}" + (f" (Schedule: {schedule})" if schedule else ""))
+
+        # Workstream
+        workstream = info.get("workstream", "")
+        if workstream:
+            why.append(f"Workstream: {workstream}")
+
+        # Ownership
+        owner = info.get("owner", "")
+        poc = info.get("poc_name", "")
         if owner:
-            why.append(f"Owned by {owner}, ensuring reliability and support.")
+            why.append(f"Org owner: {owner}" + (f", POC: {poc}" if poc else ""))
+        elif poc:
+            why.append(f"POC: {poc}")
 
-        quality = info.get("quality_score", "")
-        if quality:
-            why.append(f"Quality score: {quality}/100.")
-
-        desc = info.get("description", "")
-        if desc:
-            why.append(desc)
+        # Notes (if not already added)
+        notes = info.get("notes", "")
+        if notes and not any(notes in w for w in why):
+            why.append(notes)
 
         if not why:
             why.append("This table was found in the knowledge base.")
 
         # Build stats
-        row_count = format_row_count(info.get("row_count", "0"))
-        last_updated = format_time_ago(info.get("last_modified_date", ""))
-        quality_score = 0
-        try:
-            quality_score = int(info.get("quality_score", 0))
-        except (ValueError, TypeError):
+        row_count = info.get("row_count", "")
+        if row_count:
+            row_count = format_row_count(row_count)
+        else:
+            row_count = "N/A"
+
+        last_access = info.get("last_access", "")
+        if last_access:
+            last_updated = last_access
+        else:
+            last_updated = format_time_ago(info.get("table_create_date", ""))
+
+        read_count = info.get("read_count", "")
+        space_gb = info.get("space_gb", "")
+
+        # Check for deprecated tables
+        alternatives = []
+        if status.lower() == "deprecated":
+            # Already handled in why
+            pass
+        elif status.lower() == "restricted":
             pass
 
-        # Check for deprecated/alternative tables
-        alternatives = []
-        status = info.get("status", "").lower()
-        health = info.get("health_status", "").lower()
-
-        if status == "deprecated" or health == "deprecated":
-            replacement = info.get("replacement_table", "")
-            if replacement:
-                # The searched table is deprecated — swap recommendation
-                replacement_info = store.get_table_info(replacement)
-                if replacement_info:
-                    return self._build_deprecated_redirect(info, replacement_info, store)
-
-        # Find alternatives (deprecated/staging versions)
+        # Find alternatives
         self._add_alternatives(table_name, info, alternatives, store)
 
         # Determine confidence
         sources_count = len(info.get("sources_used", []))
-        if sources_count >= 3 and quality_score >= 90:
+        if sources_count >= 3:
             confidence = "high"
         elif sources_count >= 2:
-            confidence = "medium"
+            confidence = "high"
         else:
-            confidence = "low"
+            confidence = "medium"
 
         return {
             "recommended": {
@@ -218,9 +259,10 @@ class SourceOfTruthAgent(BaseAgent):
                 "stats": {
                     "row_count": row_count,
                     "last_updated": last_updated,
-                    "quality_score": quality_score,
+                    "space_gb": space_gb or "N/A",
+                    "read_count": read_count or "N/A",
                 },
-                "modernized": mod_status == "Completed",
+                "modernized": bool(modernized),
             },
             "alternatives": alternatives,
             "confidence": confidence,
@@ -456,7 +498,10 @@ class SourceOfTruthAgent(BaseAgent):
             chat_system = (
                 self.system_prompt
                 + "\n\nYou are in CHAT mode. Respond conversationally to the user. "
-                "When you find matching tables, include them in your JSON response. "
+                "When you find matching tables, include their migration status, GCP location, "
+                "workstream, owner, and any important notes. "
+                "If a table is Deprecated or Restricted, ALWAYS highlight the Notes which contain "
+                "important instructions about alternatives. "
                 "If the user asks a follow-up, use the conversation history for context.\n\n"
                 f"Knowledge Base Context:\n{kb_context}"
             )
@@ -519,25 +564,40 @@ class SourceOfTruthAgent(BaseAgent):
         }
 
     def _extract_search_terms(self, message: str) -> list[str]:
-        """Extract potential table names from a natural language message."""
+        """Extract potential table/object names from a natural language message.
+        Handles patterns like:
+          - billing_dim_6131 (underscore-separated with numeric suffix)
+          - FIN_CORE_164 (database names)
+          - FIN_CORE_164.billing_dim_6131 (fully qualified)
+          - vz-it-pr-gk1v-bizdo-0.ntl_prd_qmtbls.table_name (BQ paths)
+        """
         import re
         terms = []
-        # Match patterns like schema.table, database.schema.table
-        patterns = [
-            r'`([^`]+)`',
-            r'(?:table|for|of|called|named|equivalent)\s+["\']?(\w+(?:\.\w+){1,2})["\']?',
-            r'(\w+\.\w+(?:\.\w+)?)',
-        ]
-        for pattern in patterns:
-            matches = re.findall(pattern, message, re.IGNORECASE)
-            terms.extend(matches)
+        # Match backtick-quoted names
+        terms.extend(re.findall(r'`([^`]+)`', message))
+        # Match fully qualified BQ paths (project.dataset.table)
+        terms.extend(re.findall(r'([\w-]+\.[\w-]+\.[\w-]+)', message))
+        # Match database.table patterns (e.g., FIN_CORE_164.billing_dim_6131)
+        terms.extend(re.findall(r'(\w+\.\w+)', message))
+        # Match object name patterns (word_word_digits)
+        terms.extend(re.findall(r'\b([a-zA-Z]+_[a-zA-Z]+_\d{3,})\b', message))
+        # Match database name patterns (WORD_WORD_digits)
+        terms.extend(re.findall(r'\b([A-Z]+_[A-Z]+_\d+)\b', message))
+        # Match after keywords like "table", "object", "for", etc.
+        terms.extend(re.findall(
+            r'(?:table|object|for|of|called|named|status of|find|where is|look up)\s+["\']?(\w+(?:[._]\w+)*)["\']?',
+            message, re.IGNORECASE
+        ))
 
         # Deduplicate while preserving order
         seen = set()
         unique = []
+        stop_words = {"the", "for", "and", "this", "that", "with", "from",
+                       "check", "what", "where", "status", "table", "object",
+                       "find", "look", "tell", "about", "show"}
         for t in terms:
             t_lower = t.lower().strip()
-            if t_lower not in seen and len(t_lower) > 2:
+            if t_lower not in seen and len(t_lower) > 3 and t_lower not in stop_words:
                 seen.add(t_lower)
                 unique.append(t)
         return unique
@@ -545,26 +605,47 @@ class SourceOfTruthAgent(BaseAgent):
     def _build_text_response(self, info: dict, search_terms: list[str]) -> str:
         """Build a conversational text response from table info."""
         table_name = info.get("gcp_table", info.get("table_name", ""))
+        legacy_table = info.get("legacy_table", "")
         gcp_path = info.get("gcp_full_path", "")
         project = info.get("gcp_project", "")
         dataset = info.get("gcp_dataset", "")
-        mod_status = info.get("modernization_status", "")
+        status = info.get("status", "")
 
-        parts = [f"I found the table **{table_name}**"]
+        parts = [f"I found **{table_name}**"]
+        if legacy_table and legacy_table != table_name:
+            parts.append(f"(Teradata source: {legacy_table})")
         if gcp_path:
             parts.append(f"in GCP at `{gcp_path}`")
-        if project:
+        elif project:
             parts.append(f"(project: {project}, dataset: {dataset})")
         parts.append(".")
 
-        if mod_status == "Completed":
-            parts.append("This table has been fully modernized and migrated to BigQuery.")
-        elif mod_status == "In Progress":
-            parts.append("Note: This table's modernization is still in progress.")
+        if status == "Available":
+            parts.append("Status: ✅ Available in GCP.")
+        elif status == "Deprecated":
+            parts.append("Status: ⚠️ Deprecated.")
+            notes = info.get("notes", "")
+            if notes:
+                parts.append(f"Note: {notes}")
+        elif status == "Restricted":
+            parts.append("Status: 🔒 Restricted.")
+            notes = info.get("notes", "")
+            if notes:
+                parts.append(f"Note: {notes}")
+        elif status == "In development":
+            parts.append("Status: 🔧 In Development.")
 
-        owner = info.get("owner_team", "")
+        modernized = info.get("modernized_table", "")
+        if modernized:
+            parts.append(f"Modernized table: {modernized}.")
+
+        owner = info.get("owner", "")
         if owner:
-            parts.append(f"It's managed by the {owner} team.")
+            parts.append(f"Org: {owner}.")
+
+        workstream = info.get("workstream", "")
+        if workstream:
+            parts.append(f"Workstream: {workstream}.")
 
         return " ".join(parts)
 

@@ -10,17 +10,28 @@ from knowledge.metadata import format_time_ago
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are the Data Triage agent for enterprise data quality management.
-Your job is to scan SQL files, pipelines, and data references to identify:
-1. Deprecated tables that should be migrated
-2. Broken references (tables not found)
-3. Stale data sources
-4. Health status of all referenced tables
+SYSTEM_PROMPT = """You are the Data Triage agent for enterprise data quality and migration health management.
+You help users scan SQL files and check the health of their Teradata-to-GCP migration objects.
 
-For each issue found, provide:
-- The table name
+Your knowledge base contains:
+1. **UG1 Objects** — Migration status: Available, Deprecated, Restricted, In Development, In DVCF queue
+2. **Actuals** — Replication tracking with flip dates, DAG schedules, modernized tables
+3. **Frank Sheet** — Master inventory with ownership, replication decisions, usage stats
+
+For each object found, determine health based on:
+- Status = "Available" → healthy (migrated and ready)
+- Status = "Deprecated" → critical (sunsetted, check Notes for alternatives)
+- Status = "Restricted" → warning (access controlled, check Notes)
+- Status = "In development" → warning (not yet ready)
+- Status = "In DVCF queue" → warning (pending processing)
+- No GCP mapping found → alert (not yet migrated)
+- Has Modernized_Table → info (modernized version available)
+- Replicate_to_GCP = "N" → info (not planned for replication)
+
+For each issue, provide:
+- The table/object name
 - Severity (healthy, warning, alert, critical)
-- A descriptive message
+- A descriptive message with actionable guidance
 - Suggested actions to fix the issue
 
 Use the knowledge base context provided to give real, accurate status information.
@@ -73,57 +84,70 @@ class DataTriageAgent(BaseAgent):
             return {
                 "name": table_ref,
                 "status": "alert",
-                "issue": "Not found in knowledge base",
+                "issue": "Not found in knowledge base — may not be migrated yet",
                 "info": None,
             }
 
         status = info.get("status", "").lower()
-        health = info.get("health_status", "").lower()
-        mod_status = info.get("modernization_status", "").lower()
+        notes = info.get("notes", "")
 
-        if status == "deprecated" or health == "deprecated":
+        if status == "deprecated":
+            msg = "Deprecated"
+            if notes:
+                msg += f" — {notes}"
             return {
                 "name": table_ref,
                 "status": "alert",
-                "issue": f"Deprecated{' on ' + info.get('deprecation_date', '') if info.get('deprecation_date') else ''}",
+                "issue": msg,
                 "info": info,
             }
-        elif status in ("not_found", ""):
-            if not info.get("gcp_full_path"):
+        elif status == "restricted":
+            msg = "Restricted access"
+            if notes:
+                msg += f" — {notes}"
+            return {
+                "name": table_ref,
+                "status": "warning",
+                "issue": msg,
+                "info": info,
+            }
+        elif status == "in development":
+            msg = "In development — not yet available"
+            if notes:
+                msg += f" — {notes}"
+            return {
+                "name": table_ref,
+                "status": "warning",
+                "issue": msg,
+                "info": info,
+            }
+        elif status == "in dvcf queue":
+            return {
+                "name": table_ref,
+                "status": "warning",
+                "issue": "In DVCF queue — pending processing",
+                "info": info,
+            }
+        elif status == "available":
+            # Check for additional info
+            gcp_table = info.get("gcp_table", "")
+            if gcp_table:
                 return {
                     "name": table_ref,
-                    "status": "alert",
-                    "issue": "Table not found or deleted",
+                    "status": "healthy",
+                    "issue": None,
                     "info": info,
                 }
-        elif status == "staging" or "staging" in table_ref.lower():
-            return {
-                "name": table_ref,
-                "status": "warning",
-                "issue": "Staging table — not recommended for production",
-                "info": info,
-            }
-        elif mod_status == "in progress":
-            return {
-                "name": table_ref,
-                "status": "warning",
-                "issue": "Modernization in progress — may have incomplete data",
-                "info": info,
-            }
-        elif mod_status == "not started":
-            return {
-                "name": table_ref,
-                "status": "warning",
-                "issue": "Not yet modernized — still on legacy platform",
-                "info": info,
-            }
-        elif health == "warning":
-            return {
-                "name": table_ref,
-                "status": "warning",
-                "issue": info.get("issue", "Minor issue detected"),
-                "info": info,
-            }
+        elif not status:
+            # No status from UG1, check if it exists in actuals/frank
+            replicate = info.get("replicate_to_gcp", "")
+            if replicate == "N":
+                return {
+                    "name": table_ref,
+                    "status": "warning",
+                    "issue": "Not marked for GCP replication",
+                    "info": info,
+                }
 
         return {
             "name": table_ref,
@@ -506,32 +530,42 @@ class DataTriageAgent(BaseAgent):
         return {
             "response_text": (
                 "I couldn't find any tables in your message. "
-                "Try mentioning a table name like 'dim_customer' or paste SQL code directly."
+                "Try mentioning a table name like 'billing_dim_6131' or 'FIN_CORE_164.billing_dim_6131', "
+                "or paste SQL code directly for analysis."
             ),
             "structured_data": None,
             "data_type": None,
         }
 
     def _extract_table_names_from_text(self, message: str) -> list[str]:
-        """Extract potential table names from natural language text."""
+        """Extract potential table/object names from natural language text."""
         terms = []
-        patterns = [
-            r'`([^`]+)`',
-            r'(?:table|check|health|status|of|for)\s+["\']?(\w+(?:\.\w+){0,2})["\']?',
-            r'(\w+\.\w+(?:\.\w+)?)',
-        ]
-        for pattern in patterns:
-            matches = re.findall(pattern, message, re.IGNORECASE)
-            terms.extend(matches)
+        # Backtick-quoted names
+        terms.extend(re.findall(r'`([^`]+)`', message))
+        # Fully qualified BQ paths (project.dataset.table)
+        terms.extend(re.findall(r'([\w-]+\.[\w-]+\.[\w-]+)', message))
+        # database.table patterns
+        terms.extend(re.findall(r'(\w+\.\w+)', message))
+        # Object name patterns (word_word_digits)
+        terms.extend(re.findall(r'\b([a-zA-Z]+_[a-zA-Z]+_\d{3,})\b', message))
+        # Database name patterns (WORD_WORD_digits)
+        terms.extend(re.findall(r'\b([A-Z]+_[A-Z]+_\d+)\b', message))
+        # After keywords
+        terms.extend(re.findall(
+            r'(?:table|object|check|health|status|of|for|scan)\s+["\']?(\w+(?:[._]\w+)*)["\']?',
+            message, re.IGNORECASE
+        ))
 
         seen = set()
         unique = []
+        stop_words = {"the", "for", "and", "this", "that", "with", "from",
+                       "check", "what", "where", "status", "table", "object",
+                       "health", "scan", "tell", "about", "show"}
         for t in terms:
             t_lower = t.lower().strip()
-            if t_lower not in seen and len(t_lower) > 2:
-                if t_lower not in ("the", "for", "and", "this", "that", "with", "from", "check"):
-                    seen.add(t_lower)
-                    unique.append(t)
+            if t_lower not in seen and len(t_lower) > 3 and t_lower not in stop_words:
+                seen.add(t_lower)
+                unique.append(t)
         return unique
 
     def get_sample_scan_response(self, filename: Optional[str] = None) -> dict:

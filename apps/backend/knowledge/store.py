@@ -264,8 +264,13 @@ class KnowledgeStore:
             matches = source.search(query)
             for row in matches:
                 # Build a table identifier from available fields
+                # Support both old and new column naming conventions
                 table_id = (
-                    row.get("gcp_table", "")
+                    row.get("TD_Object_Name", "")
+                    or row.get("GCP_Object_Name", "")
+                    or row.get("GCP_Replicated_Table", "")
+                    or row.get("tablename", "")
+                    or row.get("gcp_table", "")
                     or row.get("table_name", "")
                     or row.get("legacy_table", "")
                     or row.get("target_table", "")
@@ -298,46 +303,59 @@ class KnowledgeStore:
                     return str(val).strip()
             return default
 
-        # Build a unified table info object
+        # Build a unified table info object that maps columns from all 3 sources:
+        # - UG1 Objects: TD_Object_Name, GCP_Object_Name, Status, Notes, etc.
+        # - Actuals: GCP_Replicated_Table, BQ_View, Flipped_Date, Modernized_Table, etc.
+        # - Frank Sheet: tablename, TableOrgOwner, POC_Name, RowCount, etc.
         info: dict = {
             "table_name": (
-                _get("gcp_table", "table_name") or table_name
+                _get("GCP_Object_Name", "GCP_Replicated_Table", "Target_View_Name",
+                     "tablename", "gcp_table", "table_name")
+                or table_name
             ),
-            "legacy_table": _get("legacy_table"),
-            "legacy_database": _get("legacy_database"),
-            "legacy_schema": _get("legacy_schema"),
-            "object_type": _get("object_type", default="TABLE"),
-            "gcp_project": _get("gcp_project", "project"),
-            "gcp_dataset": _get("gcp_dataset", "dataset"),
-            "gcp_table": _get("gcp_table"),
-            "gcp_full_path": _get("gcp_full_path", "full_path"),
-            "modernization_status": _get("modernization_status", "modernized"),
-            "data_flipped": _get("data_flipped"),
-            "flip_date": _get("flip_date"),
-            "owner_team": _get("owner_team", "owner"),
-            "refresh_cadence": _get("refresh_cadence", "schedule"),
-            "row_count": _get("row_count"),
-            "size_bytes": _get("size_bytes"),
-            "num_columns": _get("num_columns"),
-            "quality_score": _get("quality_score"),
-            "created_date": _get("created_date"),
-            "last_modified_date": _get("last_modified_date", "last_updated"),
-            "last_queried_date": _get("last_queried_date"),
-            "partitioned": _get("partitioned"),
-            "partition_field": _get("partition_field"),
-            "clustered": _get("clustered"),
-            "cluster_fields": _get("cluster_fields"),
-            "description": _get("description", "notes"),
-            "labels": _get("labels"),
-            "status": _get("status"),
-            "health_status": _get("health_status"),
-            "issue": _get("issue"),
-            "sla_tier": _get("sla_tier"),
-            "data_classification": _get("data_classification"),
-            "deprecation_date": _get("deprecation_date"),
-            "replacement_table": _get("replacement_table"),
-            "migration_wave": _get("migration_wave"),
-            "migration_status": _get("migration_status"),
+            "legacy_table": _get("TD_Object_Name", "tablename", "legacy_table"),
+            "legacy_database": _get("TD_DB_Name", "TD_Database_Name", "Database",
+                                     "legacy_database"),
+            "legacy_reference": _get("TD_Object_Reference"),
+            "object_type": _get("ObjectType", "object_type", default="TABLE"),
+            "gcp_project": _get("GCP_Workspace", "GCP_Replicated_Project",
+                                "Target_Project", "gcp_project"),
+            "gcp_dataset": _get("GCP_Datasets", "GCP_Replicated_Dataset",
+                                "Target_Dataset", "gcp_dataset"),
+            "gcp_table": _get("GCP_Object_Name", "GCP_Replicated_Table",
+                              "Target_View_Name", "gcp_table"),
+            "gcp_full_path": _get("BQ_View", "GCP_Reference", "gcp_full_path"),
+            "workstream": _get("Workstream"),
+            "status": _get("Status", "status"),
+            "notes": _get("Notes", "Comments"),
+            "owner": _get("Owner", "TableOrgOwner"),
+            "poc_name": _get("POC_Name"),
+            "support_contact": _get("Support_Contact"),
+            "product_area": _get("ProductArea"),
+            "domain": _get("Domain"),
+            "ug_classification": _get("UG_Classification"),
+            "collate_view_created": _get("Collate_View_Created"),
+            "flipped_date": _get("Flipped_Date"),
+            "modernized_table": _get("Modernized_Table"),
+            "modernized_project": _get("Modernized_Project"),
+            "replication_dag": _get("Replication_Dag_Name"),
+            "replication_schedule": _get("Replication_Dag_Schedule"),
+            "modernized_dag": _get("Modernized_Dag_Name"),
+            "modernized_schedule": _get("Modernized_Dag_Schedule"),
+            "replicate_to_gcp": _get("Replicate_to_GCP"),
+            "table_priority": _get("TablePriority"),
+            "replication_frequency": _get("Replication_Frequency"),
+            "load_type": _get("Load_Type"),
+            "dependent_tables": _get("TableList", "Dependent_Tables"),
+            "object_replicated": _get("Object_Replicated"),
+            "space_gb": _get("SpaceGB"),
+            "row_count": _get("RowCount", "row_count"),
+            "read_count": _get("ReadCnt"),
+            "write_count": _get("WriteCnt"),
+            "last_access": _get("LastAccessTimestamp"),
+            "table_create_date": _get("TableCreateDate", "created_date"),
+            "dev_team_status": _get("DevTeamStatus"),
+            "dev_team_comments": _get("DevTeamComments"),
             "sources_used": lookup["source_names"],
         }
 
@@ -349,9 +367,15 @@ class KnowledgeStore:
     def get_all_table_names(self) -> list[str]:
         """Return a sorted list of all known table names from all sources."""
         names: set[str] = set()
+        name_fields = [
+            "TD_Object_Name", "GCP_Object_Name", "TD_Object_Reference",
+            "GCP_Replicated_Table", "Target_View_Name", "BQ_View",
+            "Modernized_Table", "tablename",
+            "gcp_table", "legacy_table", "table_name", "target_table",
+        ]
         for source in self._sources:
             for row in source.rows:
-                for field in ["gcp_table", "legacy_table", "table_name", "target_table"]:
+                for field in name_fields:
                     val = row.get(field, "").strip()
                     if val:
                         names.add(val)
@@ -360,16 +384,17 @@ class KnowledgeStore:
     def get_tables_by_status(self, status: str) -> list[dict]:
         """Find tables with a specific status (active, deprecated, etc.)."""
         results = []
+        status_lower = status.lower()
         for source in self._sources:
-            if source.source_type in ("status", "mapping"):
-                for row in source.rows:
-                    row_status = (
-                        row.get("status", "")
-                        or row.get("health_status", "")
-                        or row.get("modernization_status", "")
-                    ).lower()
-                    if status.lower() in row_status:
-                        results.append(row)
+            for row in source.rows:
+                row_status = (
+                    row.get("Status", "")
+                    or row.get("status", "")
+                    or row.get("health_status", "")
+                    or row.get("DevTeamStatus", "")
+                ).lower()
+                if status_lower in row_status:
+                    results.append(row)
         return results
 
     def get_tables_by_team(self, team: str) -> list[dict]:
@@ -378,20 +403,41 @@ class KnowledgeStore:
         results = []
         for source in self._sources:
             for row in source.rows:
-                owner = row.get("owner_team", "").lower()
+                owner = (
+                    row.get("Owner", "")
+                    or row.get("TableOrgOwner", "")
+                    or row.get("owner_team", "")
+                ).lower()
                 if team_lower in owner:
+                    results.append(row)
+        return results
+
+    def get_tables_by_workstream(self, workstream: str) -> list[dict]:
+        """Find tables belonging to a specific workstream."""
+        ws_lower = workstream.lower()
+        results = []
+        for source in self._sources:
+            for row in source.rows:
+                ws = row.get("Workstream", "").lower()
+                if ws_lower in ws:
                     results.append(row)
         return results
 
     def get_dag_for_table(self, table_name: str) -> Optional[dict]:
         """Find the DAG/pipeline that feeds a specific table."""
         table_lower = table_name.lower()
+        # Check actuals for replication DAG info
         for source in self._sources:
-            if source.source_type == "inventory":
-                for row in source.rows:
-                    target = row.get("target_table", "").lower()
+            for row in source.rows:
+                # Check various table name fields
+                for field in ["TD_Object_Name", "GCP_Replicated_Table",
+                              "Target_View_Name", "tablename", "target_table"]:
+                    target = row.get(field, "").lower()
                     if target and table_lower in target:
-                        return row
+                        dag_name = (row.get("Replication_Dag_Name", "")
+                                    or row.get("Modernized_Dag_Name", ""))
+                        if dag_name:
+                            return row
         return None
 
     # ------------------------------------------------------------------
