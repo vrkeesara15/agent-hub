@@ -1,0 +1,7 @@
+dag_id,schedule,source_system,target_table,status,last_run,owner
+daily_customer_sync,0 2 * * *,EDW_TABLES,dim_customer,active,2026-02-26T02:00:00Z,data-engineering
+daily_sales_load,0 3 * * *,SALES_DB,fact_sales,active,2026-02-26T03:00:00Z,data-engineering
+weekly_product_refresh,0 6 * * 1,SUPPLY_DB,dim_product,active,2026-02-24T06:00:00Z,data-engineering
+legacy_customer_copy,0 4 * * *,EDW_TABLES,old_customers,disabled,2024-01-15T04:00:00Z,data-engineering
+network_events_stream,streaming,NETWORK_DB,network_events_stream,active,2026-02-26T12:00:00Z,network-engineering
+billing_daily,0 5 * * *,FINANCE_DB,billing_detail_raw,active,2026-02-26T05:00:00Z,finance-team

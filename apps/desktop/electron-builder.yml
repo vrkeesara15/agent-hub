@@ -1,0 +1,14 @@
+appId: com.monarch.agenthub
+productName: Agent Hub
+directories:
+  output: dist
+files:
+  - main.js
+  - preload.js
+  - ../web/out/**/*
+mac:
+  category: public.app-category.developer-tools
+  icon: icon.icns
+win:
+  icon: icon.ico
+  target: nsis

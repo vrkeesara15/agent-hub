@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design system CSS custom properties */
+:root {
+  --color-surface-bg: #F7F8FC;
+  --color-surface-card: #FFFFFF;
+  --color-surface-border: #E2E5EB;
+  --color-text-primary: #1A1A2E;
+  --color-text-secondary: #6B7280;
+  --color-text-muted: #9CA3AF;
+  --color-alert-bg: #FEF2F2;
+}
+
+.dark {
+  --color-surface-bg: #0F1117;
+  --color-surface-card: #1A1D2E;
+  --color-surface-border: #2A2D3E;
+  --color-text-primary: #E8E9ED;
+  --color-text-secondary: #9CA3AF;
+  --color-text-muted: #6B7280;
+  --color-alert-bg: #2D1A1A;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background-color: var(--color-surface-bg);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #4B5563;
+}
+
+/* Code editor styling */
+.code-editor {
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+/* Shimmer loading animation */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+.dark .shimmer {
+  background: linear-gradient(90deg, #1A1D2E 25%, #252840 50%, #1A1D2E 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}

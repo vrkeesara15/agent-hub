@@ -1,0 +1,26 @@
+table_name,gcp_full_path,status,deprecation_date,replacement_table,migration_wave,migration_status,sla_tier,data_classification,last_health_check,health_status,issue
+customer_account_master,vz-data-prod-workspace-7.edw_modernized.customer_account_master,active,,,,Completed,Tier 1,Confidential,2026-02-26T06:00:00Z,healthy,
+wireless_subscriber_detail,vz-data-prod-workspace-3.wireless_modernized.wireless_subscriber_detail,active,,,,Completed,Tier 1,Confidential,2026-02-26T06:00:00Z,healthy,
+billing_detail_raw,vz-data-prod-workspace-5.finance_raw.billing_detail_raw,active,,,Wave 3,In Progress,Tier 2,Confidential,2026-02-26T06:00:00Z,warning,Modernization pending - raw data only
+inventory_master,vz-data-prod-workspace-4.prod_modernized.inventory_master,active,,,,Completed,Tier 2,Internal,2026-02-26T06:00:00Z,healthy,
+network_events_stream,vz-data-prod-workspace-6.network_raw.network_events_stream,active,,,Wave 2,In Progress,Tier 1,Internal,2026-02-26T06:00:00Z,warning,High volume - modernization in progress
+order_management_master,vz-data-prod-workspace-7.sales_modernized.order_management_master,active,,,,Completed,Tier 1,Confidential,2026-02-26T06:00:00Z,healthy,
+device_catalog,vz-data-prod-workspace-3.wireless_modernized.device_catalog,active,,,,Completed,Tier 3,Public,2026-02-26T06:00:00Z,healthy,
+plan_features_detail,vz-data-prod-workspace-3.wireless_modernized.plan_features_detail,active,,,,Completed,Tier 2,Internal,2026-02-26T06:00:00Z,healthy,
+campaign_performance,vz-data-prod-workspace-7.marketing_modernized.campaign_performance,active,,,,Completed,Tier 2,Internal,2026-02-26T06:00:00Z,healthy,
+dim_customer,vz-data-prod-workspace-7.edw_modernized.dim_customer,active,,,,Completed,Tier 1,Confidential,2026-02-26T06:00:00Z,healthy,
+fact_sales,vz-data-prod-workspace-7.edw_modernized.fact_sales,active,,,,Completed,Tier 1,Confidential,2026-02-26T06:00:00Z,healthy,
+dim_product,vz-data-prod-workspace-7.edw_modernized.dim_product,active,,,,Completed,Tier 2,Internal,2026-02-26T06:00:00Z,healthy,
+dim_date,vz-data-prod-workspace-7.edw_modernized.dim_date,active,,,,Completed,Tier 3,Public,2026-02-26T06:00:00Z,healthy,
+customer_interaction_history,vz-data-prod-workspace-7.crm_modernized.customer_interaction_history,active,,,,Completed,Tier 2,Confidential,2026-02-26T06:00:00Z,healthy,
+payment_transaction_detail,vz-data-prod-workspace-5.finance_modernized.payment_transaction_detail,active,,,,Completed,Tier 1,Confidential,2026-02-26T06:00:00Z,healthy,
+network_coverage_map,vz-data-prod-workspace-6.network_modernized.network_coverage_map,active,,,,Completed,Tier 3,Internal,2026-02-26T06:00:00Z,healthy,
+service_ticket_master,vz-data-prod-workspace-7.crm_modernized.service_ticket_master,active,,,,Completed,Tier 2,Confidential,2026-02-26T06:00:00Z,healthy,
+employee_directory,,,not_started,,,Wave 4,Not Started,Tier 3,Confidential,,,Not yet migrated to GCP
+revenue_summary_daily,vz-data-prod-workspace-5.finance_modernized.revenue_summary_daily,active,,,,Completed,Tier 1,Confidential,2026-02-26T06:00:00Z,healthy,
+churn_prediction_scores,vz-data-prod-workspace-7.ml_models.churn_prediction_scores,active,,,,Completed,Tier 2,Internal,2026-02-26T06:00:00Z,healthy,
+old_customers,vz-data-staging.legacy_edw.old_customers,deprecated,2024-01-15,dim_customer,Wave 1,Completed,Tier 3,Confidential,2024-01-15T00:00:00Z,deprecated,Deprecated - use dim_customer instead
+old_customer_info,vz-data-staging.legacy_edw.old_customer_info,deprecated,2024-03-01,customer_account_master,Wave 1,Completed,Tier 3,Confidential,2024-03-01T00:00:00Z,deprecated,Deprecated - use customer_account_master
+stg_customer_raw,vz-data-staging.staging_area.stg_customer_raw,staging,,,,,Tier 3,Internal,2026-02-26T02:00:00Z,warning,Staging table - not for production use
+temp_orders,vz-data-staging.staging_area.temp_orders,staging,,,,,Tier 3,Internal,2026-02-26T04:30:00Z,warning,Temporary staging table
+summary_cache,,not_found,,,,,,,,not_found,Table deleted or moved - no longer available

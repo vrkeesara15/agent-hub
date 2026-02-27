@@ -1,0 +1,11 @@
+table_name,project,dataset,full_path,status,last_updated,issue
+analytics.fact_sales,vz-data-prod-workspace-7,edw_modernized,vz-data-prod-workspace-7.edw_modernized.fact_sales,healthy,2026-02-26T01:15:00Z,
+analytics.dim_customer,vz-data-prod-workspace-7,edw_modernized,vz-data-prod-workspace-7.edw_modernized.dim_customer,healthy,2026-02-26T01:22:00Z,
+analytics.dim_product,vz-data-prod-workspace-7,edw_modernized,vz-data-prod-workspace-7.edw_modernized.dim_product,healthy,2026-02-26T01:22:00Z,
+analytics.dim_date,vz-data-prod-workspace-7,edw_modernized,vz-data-prod-workspace-7.edw_modernized.dim_date,healthy,2026-02-23T06:00:00Z,
+staging.temp_orders,vz-data-staging,staging_area,vz-data-staging.staging_area.temp_orders,warning,2026-02-26T04:30:00Z,Staging table
+staging.stg_customer_raw,vz-data-staging,staging_area,vz-data-staging.staging_area.stg_customer_raw,warning,2026-02-26T02:00:00Z,Raw staging data
+legacy.old_customers,vz-data-staging,legacy_edw,vz-data-staging.legacy_edw.old_customers,deprecated,2024-01-15T00:00:00Z,Deprecated Jan 2024
+legacy.old_customer_info,vz-data-staging,legacy_edw,vz-data-staging.legacy_edw.old_customer_info,deprecated,2024-03-01T00:00:00Z,Deprecated - use dim_customer
+reports.summary_cache,vz-data-dev,reports_cache,,not_found,,Table deleted or moved
+customer_account,vz-data-staging,legacy_edw,vz-data-staging.legacy_edw.customer_account,stale,2025-11-15T00:00:00Z,Non-modernized stale copy

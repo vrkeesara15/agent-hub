@@ -1,0 +1,14 @@
+legacy_table,legacy_database,gcp_project,gcp_dataset,gcp_table,modernized,owner_team,refresh_cadence,row_count,quality_score,notes
+CUSTOMER_ACCOUNT,EDW_TABLES,vz-data-prod-workspace-7,edw_modernized,customer_account_master,Yes,Marketing Analytics,Daily,48200000,95,Primary customer table
+WIRELESS_SUBSCRIBER,WIRELESS_DB,vz-data-prod-workspace-3,wireless_modernized,wireless_subscriber_detail,Yes,Wireless Engineering,Daily,112700000,92,
+BILLING_DETAIL,FINANCE_DB,vz-data-prod-workspace-5,finance_raw,billing_detail_raw,No,Finance Team,Daily,89000000,78,Modernization in progress
+PRODUCT_INVENTORY,SUPPLY_DB,vz-data-prod-workspace-4,prod_modernized,inventory_master,Yes,Supply Chain,Daily,5600000,97,
+NETWORK_EVENTS,NETWORK_DB,vz-data-prod-workspace-6,network_raw,network_events_stream,No,Network Engineering,Streaming,500000000,85,High volume
+ORDER_MANAGEMENT,SALES_DB,vz-data-prod-workspace-7,sales_modernized,order_management_master,Yes,Sales Analytics,Daily,23400000,91,
+DEVICE_CATALOG,DEVICE_DB,vz-data-prod-workspace-3,wireless_modernized,device_catalog,Yes,Device Team,Weekly,1200000,98,
+PLAN_FEATURES,WIRELESS_DB,vz-data-prod-workspace-3,wireless_modernized,plan_features_detail,Yes,Product Team,Daily,8900000,94,
+MARKETING_CAMPAIGN,MKTG_DB,vz-data-prod-workspace-7,marketing_modernized,campaign_performance,Yes,Marketing Analytics,Daily,4500000,90,
+DIM_CUSTOMER,ANALYTICS_DB,vz-data-prod-workspace-7,edw_modernized,dim_customer,Yes,Data Engineering,Daily,2400000,95,Used by 14 reports
+FACT_SALES,ANALYTICS_DB,vz-data-prod-workspace-7,edw_modernized,fact_sales,Yes,Data Engineering,Daily,156000000,93,
+DIM_PRODUCT,ANALYTICS_DB,vz-data-prod-workspace-7,edw_modernized,dim_product,Yes,Data Engineering,Daily,340000,97,
+DIM_DATE,ANALYTICS_DB,vz-data-prod-workspace-7,edw_modernized,dim_date,Yes,Data Engineering,Weekly,36500,100,

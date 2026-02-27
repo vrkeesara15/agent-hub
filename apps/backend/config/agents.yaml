@@ -1,0 +1,27 @@
+agents:
+  - name: Source of Truth
+    slug: source-of-truth
+    description: Discover the right table across legacy and modern data platforms. Ask in plain English and get the best match with lineage, quality scores, and migration status.
+    status: active
+    stats:
+      tables_indexed: 2847
+      queries_today: 142
+      accuracy: "96%"
+
+  - name: Code Accelerator
+    slug: code-accelerator
+    description: Convert legacy SQL, stored procedures, and ETL scripts to modern BigQuery-compatible code. Supports Teradata, Oracle, and Netezza migrations.
+    status: active
+    stats:
+      conversions_today: 89
+      languages_supported: 6
+      avg_accuracy: "94%"
+
+  - name: Data Triage
+    slug: data-triage
+    description: Scan SQL files and pipelines for deprecated tables, broken references, and stale data. Get instant fix suggestions with one click.
+    status: active
+    stats:
+      scans_today: 56
+      issues_found: 23
+      auto_fixed: 18
