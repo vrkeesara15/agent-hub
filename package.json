@@ -3,13 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "workspaces": [
-    "apps/web",
-    "apps/desktop"
+    "apps/web"
   ],
   "scripts": {
     "dev": "npm run dev --workspace=apps/web",
     "build": "npm run build --workspace=apps/web",
     "start": "npm run start --workspace=apps/web",
-    "desktop": "npm run dev --workspace=apps/desktop"
+    "desktop": "cd apps/desktop && npm run dev"
   }
 }
