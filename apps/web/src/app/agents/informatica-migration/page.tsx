@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
+import JSZip from 'jszip';
 import { Breadcrumb } from '@/components/layout/Breadcrumb';
 import { Button } from '@/components/ui/Button';
 import { migrateInformatica } from '@/lib/api';
@@ -156,6 +157,95 @@ export default function InformaticaMigrationPage() {
     setResult(null);
     setError(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // ── Download helpers ──
+  const downloadFile = (content: string, name: string) => {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const buildTransformMapCSV = (r: InformaticaMigrationResponse) => {
+    const header = 'Informatica Type,GCP Equivalent,Conversion Type\n';
+    const rows = (r.transformation_map || []).map(
+      (t) => `"${t.informatica}","${t.gcp}","${t.type}"`
+    ).join('\n');
+    return header + rows;
+  };
+
+  const buildReportMarkdown = (r: InformaticaMigrationResponse) => {
+    const { good, attention } = getReportData(r);
+    const sqlPct = r.analysis?.total_transformations
+      ? Math.round((r.analysis.sql_convertible / r.analysis.total_transformations) * 100)
+      : 0;
+    let md = `# Informatica Migration Report\n`;
+    md += `**Workflow:** ${r.workflow_name || 'N/A'}\n`;
+    md += `**Complexity:** ${(r.complexity || 'N/A').toUpperCase()}\n`;
+    md += `**Conversion Score:** ${sqlPct}%\n\n`;
+    md += `## Summary\n${r.summary || 'N/A'}\n\n`;
+    md += `## Analysis\n`;
+    md += `| Metric | Value |\n|---|---|\n`;
+    md += `| Total Transformations | ${r.analysis?.total_transformations || 0} |\n`;
+    md += `| SQL Convertible | ${r.analysis?.sql_convertible || 0} |\n`;
+    md += `| Needs Dataflow | ${r.analysis?.needs_dataflow || 0} |\n`;
+    md += `| SCD Pattern Detected | ${r.analysis?.has_scd_pattern ? 'Yes' : 'No'} |\n`;
+    md += `| Sources | ${(r.sources || []).join(', ') || 'N/A'} |\n`;
+    md += `| Targets | ${(r.targets || []).join(', ') || 'N/A'} |\n\n`;
+    if (good.length > 0) {
+      md += `## What Went Well\n`;
+      good.forEach((g) => { md += `- **${g.label}** — ${g.detail}\n`; });
+      md += '\n';
+    }
+    if (attention.length > 0) {
+      md += `## Needs Attention\n`;
+      attention.forEach((a) => { md += `- **[${a.severity.toUpperCase()}]** ${a.label} — ${a.detail}\n`; });
+      md += '\n';
+    }
+    if (r.unsupported_patterns?.length) {
+      md += `## Unsupported Patterns\n`;
+      r.unsupported_patterns.forEach((p) => { md += `- **${p.pattern}** — ${p.suggestion}\n`; });
+      md += '\n';
+    }
+    if (r.recommendations?.length) {
+      md += `## Recommendations\n`;
+      r.recommendations.forEach((rec, i) => { md += `${i + 1}. ${rec}\n`; });
+    }
+    return md;
+  };
+
+  const getBaseFilename = () => {
+    if (fileName) return fileName.replace(/\.(xml|XML)$/, '');
+    if (result?.workflow_name) return result.workflow_name;
+    return 'informatica_migration';
+  };
+
+  const handleDownloadAll = async () => {
+    if (!result) return;
+    const base = getBaseFilename();
+    const zip = new JSZip();
+    zip.file(`${base}_bigquery.sql`, result.bigquery_sql || '-- No SQL generated');
+    zip.file(`${base}_airflow_dag.py`, result.airflow_dag || '# No DAG generated');
+    zip.file(`${base}_transformation_map.csv`, buildTransformMapCSV(result));
+    zip.file(`${base}_migration_report.md`, buildReportMarkdown(result));
+    if (result.scd_merge) {
+      zip.file(`${base}_scd_merge.sql`, result.scd_merge);
+    }
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${base}_gcp_migration.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const complexityColor = (c: string) => {
@@ -417,16 +507,25 @@ export default function InformaticaMigrationPage() {
       {result && !loading && (
         <div className="space-y-6">
 
-          {/* ── Result Header with Complexity Badge ── */}
-          <div className="flex items-center justify-between">
+          {/* ── Result Header with Download All + Complexity Badge ── */}
+          <div className="flex items-center justify-between flex-wrap gap-3">
             <h2 className="text-lg font-bold text-text-primary flex items-center gap-2">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               Migration Results
               {fileName && <span className="text-sm font-normal text-text-secondary ml-2">({fileName})</span>}
             </h2>
-            <div className={`flex items-center gap-2 px-4 py-2 rounded-full border text-sm font-bold uppercase ${complexityColor(result.complexity)}`}>
-              {complexityIcon(result.complexity)}
-              {result.complexity} Complexity
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleDownloadAll}
+                className="flex items-center gap-2 px-4 py-2 rounded-full border border-brand-blue text-brand-blue text-sm font-bold hover:bg-brand-blue hover:text-white transition-colors"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Download All (.zip)
+              </button>
+              <div className={`flex items-center gap-2 px-4 py-2 rounded-full border text-sm font-bold uppercase ${complexityColor(result.complexity)}`}>
+                {complexityIcon(result.complexity)}
+                {result.complexity} Complexity
+              </div>
             </div>
           </div>
 
@@ -609,6 +708,46 @@ export default function InformaticaMigrationPage() {
                     <span className="text-xs text-text-secondary">{result.analysis?.sql_convertible || 0} / {result.analysis?.total_transformations || 0} transformations</span>
                   </div>
                 </div>
+
+                {/* Download Section - full width */}
+                <div className="lg:col-span-2 p-5 bg-gradient-to-r from-indigo-50 to-blue-50 dark:from-indigo-950/20 dark:to-blue-950/20 border border-indigo-200 dark:border-indigo-800 rounded-card">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-bold text-indigo-800 dark:text-indigo-300 flex items-center gap-2">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        Download Generated Files
+                      </h3>
+                      <p className="text-xs text-indigo-600/70 dark:text-indigo-400/60 mt-1">
+                        Download all migration artifacts as a single ZIP package
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleDownloadAll}
+                      className="flex items-center gap-2 px-5 py-2.5 rounded-button bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium transition-colors"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      Download All (.zip)
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    {[
+                      { label: 'BigQuery SQL', ext: '.sql', action: () => downloadFile(result.bigquery_sql, `${getBaseFilename()}_bigquery.sql`) },
+                      { label: 'Airflow DAG', ext: '.py', action: () => downloadFile(result.airflow_dag, `${getBaseFilename()}_airflow_dag.py`) },
+                      { label: 'Transform Map', ext: '.csv', action: () => downloadFile(buildTransformMapCSV(result), `${getBaseFilename()}_transformation_map.csv`) },
+                      { label: 'Migration Report', ext: '.md', action: () => downloadFile(buildReportMarkdown(result), `${getBaseFilename()}_migration_report.md`) },
+                      ...(result.scd_merge ? [{ label: 'SCD MERGE', ext: '.sql', action: () => downloadFile(result.scd_merge, `${getBaseFilename()}_scd_merge.sql`) }] : []),
+                    ].map((item) => (
+                      <button
+                        key={item.label}
+                        onClick={item.action}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/70 dark:bg-black/20 border border-indigo-200 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 hover:bg-white dark:hover:bg-black/40 transition-colors"
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        {item.label} <span className="opacity-60">{item.ext}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             );
           })()}
@@ -618,13 +757,22 @@ export default function InformaticaMigrationPage() {
             <div className="bg-surface-card border border-surface-border rounded-card overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border bg-surface-bg/50">
                 <span className="text-xs font-medium text-text-secondary uppercase tracking-wide">BigQuery SQL Output</span>
-                <button
-                  onClick={() => navigator.clipboard.writeText(result.bigquery_sql)}
-                  className="text-xs text-brand-blue hover:underline flex items-center gap-1"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-                  Copy
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => downloadFile(result.bigquery_sql, `${getBaseFilename()}_bigquery.sql`)}
+                    className="text-xs text-brand-blue hover:underline flex items-center gap-1"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Download .sql
+                  </button>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(result.bigquery_sql)}
+                    className="text-xs text-brand-blue hover:underline flex items-center gap-1"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                    Copy
+                  </button>
+                </div>
               </div>
               <pre className="p-4 text-sm font-mono text-text-primary overflow-x-auto max-h-[500px] overflow-y-auto whitespace-pre">
                 {result.bigquery_sql}
@@ -637,13 +785,22 @@ export default function InformaticaMigrationPage() {
             <div className="bg-surface-card border border-surface-border rounded-card overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border bg-surface-bg/50">
                 <span className="text-xs font-medium text-text-secondary uppercase tracking-wide">Airflow DAG (Python)</span>
-                <button
-                  onClick={() => navigator.clipboard.writeText(result.airflow_dag)}
-                  className="text-xs text-brand-blue hover:underline flex items-center gap-1"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-                  Copy
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => downloadFile(result.airflow_dag, `${getBaseFilename()}_airflow_dag.py`)}
+                    className="text-xs text-brand-blue hover:underline flex items-center gap-1"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Download .py
+                  </button>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(result.airflow_dag)}
+                    className="text-xs text-brand-blue hover:underline flex items-center gap-1"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                    Copy
+                  </button>
+                </div>
               </div>
               <pre className="p-4 text-sm font-mono text-text-primary overflow-x-auto max-h-[500px] overflow-y-auto whitespace-pre">
                 {result.airflow_dag}
@@ -656,13 +813,22 @@ export default function InformaticaMigrationPage() {
             <div className="bg-surface-card border border-surface-border rounded-card overflow-hidden">
               <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border bg-surface-bg/50">
                 <span className="text-xs font-medium text-text-secondary uppercase tracking-wide">SCD Type 2 MERGE Statement</span>
-                <button
-                  onClick={() => navigator.clipboard.writeText(result.scd_merge)}
-                  className="text-xs text-brand-blue hover:underline flex items-center gap-1"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
-                  Copy
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => downloadFile(result.scd_merge, `${getBaseFilename()}_scd_merge.sql`)}
+                    className="text-xs text-brand-blue hover:underline flex items-center gap-1"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Download .sql
+                  </button>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(result.scd_merge)}
+                    className="text-xs text-brand-blue hover:underline flex items-center gap-1"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                    Copy
+                  </button>
+                </div>
               </div>
               <pre className="p-4 text-sm font-mono text-text-primary overflow-x-auto max-h-[500px] overflow-y-auto whitespace-pre">
                 {result.scd_merge}
@@ -673,8 +839,15 @@ export default function InformaticaMigrationPage() {
           {/* ══════ Tab: Transformation Map ══════ */}
           {activeTab === 'map' && (
             <div className="bg-surface-card border border-surface-border rounded-card overflow-hidden">
-              <div className="px-4 py-3 border-b border-surface-border bg-surface-bg/50">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border bg-surface-bg/50">
                 <span className="text-xs font-medium text-text-secondary uppercase tracking-wide">Informatica to GCP Transformation Mapping</span>
+                <button
+                  onClick={() => downloadFile(buildTransformMapCSV(result), `${getBaseFilename()}_transformation_map.csv`)}
+                  className="text-xs text-brand-blue hover:underline flex items-center gap-1"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Download .csv
+                </button>
               </div>
               <div className="p-4">
                 <table className="w-full text-sm">
