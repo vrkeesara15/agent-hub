@@ -46,6 +46,21 @@ const cards = [
     href: '/agents/data-triage',
     pills: null,
   },
+  {
+    tag: 'INFORMATICA MIGRATION',
+    bgClass: 'bg-indigo-50 dark:bg-indigo-950',
+    icon: (
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <path d="M8 13h2l2 3 2-6 2 3h2"/>
+      </svg>
+    ),
+    heading: 'Convert Informatica to GCP',
+    subtext: null,
+    href: '/agents/informatica-migration',
+    pills: ['XML→BigQuery', 'Airflow DAG', 'SCD MERGE'],
+  },
 ];
 
 const recentItems = [
@@ -75,7 +90,7 @@ export function WelcomeView() {
       </h1>
 
       {/* Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {cards.map((card) => (
           <div key={card.tag} className={`${card.bgClass} rounded-card p-6 border border-transparent`}>
             <span className="inline-block text-[10px] font-bold uppercase tracking-wider text-text-secondary bg-white/70 dark:bg-black/30 px-2 py-1 rounded mb-4">

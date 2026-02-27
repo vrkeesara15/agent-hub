@@ -122,3 +122,10 @@ class OptimizeResponse(BaseModel):
     warnings: list[dict]
     recommendations: list[str]
     optimized_code: str
+
+
+# --- Informatica Migration ---
+
+class InformaticaMigrateRequest(BaseModel):
+    xml_content: str
+    filename: str = "workflow.xml"

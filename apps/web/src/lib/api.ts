@@ -89,3 +89,12 @@ export async function optimizeSQL(inputCode: string) {
     body: JSON.stringify({ input_code: inputCode }),
   });
 }
+
+// --- Informatica Migration ---
+
+export async function migrateInformatica(xmlContent: string, filename: string) {
+  return fetchAPI<import('./types').InformaticaMigrationResponse>('/api/agents/informatica-migration/migrate', {
+    method: 'POST',
+    body: JSON.stringify({ xml_content: xmlContent, filename }),
+  });
+}

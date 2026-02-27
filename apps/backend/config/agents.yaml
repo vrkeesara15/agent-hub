@@ -25,3 +25,12 @@ agents:
       scans_today: 56
       issues_found: 23
       auto_fixed: 18
+
+  - name: Informatica Migration
+    slug: informatica-migration
+    description: Convert Informatica PowerCenter XML exports into GCP solutions — BigQuery SQL, Cloud Composer Airflow DAGs, transformation maps, and SCD MERGE statements.
+    status: active
+    stats:
+      migrations_today: 12
+      transformations_converted: 87
+      scd_patterns_detected: 9

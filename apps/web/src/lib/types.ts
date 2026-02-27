@@ -119,3 +119,39 @@ export interface OptimizeResponse {
   recommendations: string[];
   optimized_code: string;
 }
+
+// --- Informatica Migration ---
+
+export interface TransformationMapItem {
+  informatica: string;
+  gcp: string;
+  type: string;
+  sql?: string;
+}
+
+export interface UnsupportedPattern {
+  pattern: string;
+  suggestion: string;
+}
+
+export interface InformaticaMigrationResponse {
+  bigquery_sql: string;
+  airflow_dag: string;
+  transformation_map: TransformationMapItem[];
+  unsupported_patterns: UnsupportedPattern[];
+  scd_merge: string;
+  summary: string;
+  complexity: string;
+  recommendations: string[];
+  sources: string[];
+  targets: string[];
+  workflow_name: string;
+  analysis: {
+    total_transformations: number;
+    sql_convertible: number;
+    needs_dataflow: number;
+    has_scd_pattern: boolean;
+    complexity: string;
+  };
+  error?: string;
+}
