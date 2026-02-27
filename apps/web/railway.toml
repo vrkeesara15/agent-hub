@@ -3,4 +3,4 @@ builder = "nixpacks"
 buildCommand = "npm run build"
 
 [deploy]
-startCommand = "node .next/standalone/server.js"
+startCommand = "npx next start -p ${PORT:-3000}"
