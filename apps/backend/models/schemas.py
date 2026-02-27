@@ -95,3 +95,30 @@ class AgentInfo(BaseModel):
     description: str
     status: str
     stats: dict
+
+
+# --- Chat ---
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+
+
+class ChatResponse(BaseModel):
+    response_text: str
+    structured_data: Optional[dict] = None
+    data_type: Optional[str] = None
+
+
+# --- SQL Optimizer ---
+
+class OptimizeRequest(BaseModel):
+    input_code: str
+
+
+class OptimizeResponse(BaseModel):
+    health_score: int
+    critical_issues: list[dict]
+    warnings: list[dict]
+    recommendations: list[str]
+    optimized_code: str

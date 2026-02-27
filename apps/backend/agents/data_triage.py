@@ -397,6 +397,143 @@ class DataTriageAgent(BaseAgent):
             ],
         }
 
+    async def chat(self, message: str, history: list[dict] = None) -> dict:
+        """Conversational chat for data health checks."""
+        store = get_knowledge_store()
+        history = history or []
+
+        # Detect if message looks like SQL
+        sql_keywords = ["SELECT", "FROM", "JOIN", "INSERT", "CREATE", "DROP", "ALTER", "WITH"]
+        is_sql = any(kw in message.upper() for kw in sql_keywords) and len(message) > 40
+
+        scan_result = None
+        if is_sql:
+            scan_result = await self.scan(file_content=message, filename="chat_input.sql")
+        else:
+            table_names = self._extract_table_names_from_text(message)
+            if table_names:
+                tables = []
+                issues = []
+                for ref in table_names:
+                    result = self._lookup_table_status(ref, store)
+                    tables.append({
+                        "name": result["name"],
+                        "status": result["status"],
+                        "issue": result["issue"],
+                    })
+                    if result["status"] in ("alert", "critical", "warning"):
+                        issues.append({
+                            "table": ref,
+                            "severity": "critical" if result["status"] == "alert" else "warning",
+                            "message": f"Table '{ref}': {result['issue']}",
+                            "actions": ["show_fix", "search_similar"],
+                        })
+                scan_result = {
+                    "filename": "health_check",
+                    "tables_found": len(tables),
+                    "tables": tables,
+                    "issues": issues,
+                }
+
+        # Build KB context
+        kb_context = ""
+        if scan_result:
+            kb_context = f"Scan results: {scan_result.get('tables_found', 0)} tables found.\n"
+            for t in scan_result.get("tables", []):
+                kb_context += f"  {t['name']}: status={t['status']}, issue={t.get('issue', 'none')}\n"
+            if scan_result.get("issues"):
+                kb_context += f"\nIssues ({len(scan_result['issues'])}):\n"
+                for iss in scan_result["issues"]:
+                    kb_context += f"  [{iss['severity']}] {iss['message']}\n"
+
+        # Try LLM
+        if self.llm.client is not None:
+            chat_system = (
+                self.system_prompt
+                + "\n\nYou are in CHAT mode. Respond conversationally about data health. "
+                "Include scan results in structured_data when available. "
+                "Use conversation history for follow-up context.\n\n"
+                f"Knowledge Base Context:\n{kb_context}"
+            )
+
+            messages = []
+            for h in history:
+                messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+            messages.append({"role": "user", "content": message})
+
+            try:
+                import json
+                schema_hint = (
+                    "\n\nRespond with valid JSON:\n"
+                    '{"response_text": "your conversational response", '
+                    '"structured_data": { ...scan response data or null }, '
+                    '"data_type": "health_check" or null}'
+                )
+                api_response = self.llm.client.messages.create(
+                    model=self.llm.model,
+                    max_tokens=4096,
+                    system=chat_system + schema_hint,
+                    messages=messages,
+                )
+                text = api_response.content[0].text.strip()
+                if text.startswith("```"):
+                    lines = text.split("\n")
+                    lines = [l for l in lines if not l.strip().startswith("```")]
+                    text = "\n".join(lines)
+                parsed = json.loads(text)
+                return parsed
+            except Exception as exc:
+                logger.warning("Chat LLM call failed: %s", exc)
+
+        # Fallback without LLM
+        if scan_result:
+            tables_found = scan_result.get("tables_found", 0)
+            issues_count = len(scan_result.get("issues", []))
+            healthy_count = sum(1 for t in scan_result.get("tables", []) if t["status"] == "healthy")
+
+            text = f"I analyzed {tables_found} table(s). "
+            if issues_count > 0:
+                text += f"Found {issues_count} issue(s) that need attention. "
+            if healthy_count > 0:
+                text += f"{healthy_count} table(s) are healthy."
+
+            return {
+                "response_text": text,
+                "structured_data": scan_result,
+                "data_type": "health_check",
+            }
+
+        return {
+            "response_text": (
+                "I couldn't find any tables in your message. "
+                "Try mentioning a table name like 'dim_customer' or paste SQL code directly."
+            ),
+            "structured_data": None,
+            "data_type": None,
+        }
+
+    def _extract_table_names_from_text(self, message: str) -> list[str]:
+        """Extract potential table names from natural language text."""
+        terms = []
+        patterns = [
+            r'`([^`]+)`',
+            r'(?:table|check|health|status|of|for)\s+["\']?(\w+(?:\.\w+){0,2})["\']?',
+            r'(\w+\.\w+(?:\.\w+)?)',
+        ]
+        for pattern in patterns:
+            matches = re.findall(pattern, message, re.IGNORECASE)
+            terms.extend(matches)
+
+        seen = set()
+        unique = []
+        for t in terms:
+            t_lower = t.lower().strip()
+            if t_lower not in seen and len(t_lower) > 2:
+                if t_lower not in ("the", "for", "and", "this", "that", "with", "from", "check"):
+                    seen.add(t_lower)
+                    unique.append(t)
+        return unique
+
     def get_sample_scan_response(self, filename: Optional[str] = None) -> dict:
         store = get_knowledge_store()
         return self._build_health_overview(filename, store)

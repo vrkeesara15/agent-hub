@@ -1,46 +1,60 @@
 'use client';
-import React, { useState, useCallback, useEffect, Suspense } from 'react';
+import React, { useState, useCallback } from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
 import { Breadcrumb } from '@/components/layout/Breadcrumb';
-import { SearchBar } from '@/components/source-of-truth/SearchBar';
-import { RecommendedTable } from '@/components/source-of-truth/RecommendedTable';
-import { OtherTables } from '@/components/source-of-truth/OtherTables';
-import { ConfidenceBadge } from '@/components/source-of-truth/ConfidenceBadge';
-import { searchTables } from '@/lib/api';
-import { SearchResponse } from '@/lib/types';
+import { ChatContainer } from '@/components/chat/ChatContainer';
+import { ChatMessageData } from '@/components/chat/ChatMessage';
+import { renderStructuredData } from '@/components/chat/StructuredDataRenderer';
+import { chatSourceOfTruth } from '@/lib/api';
 
-function SourceOfTruthContent() {
-  const [result, setResult] = useState<SearchResponse | null>(null);
+export default function SourceOfTruthPage() {
+  const [messages, setMessages] = useState<ChatMessageData[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const searchParams = useSearchParams();
+  const [history, setHistory] = useState<{ role: string; content: string }[]>([]);
 
-  const handleSearch = useCallback(async (query: string) => {
+  const handleSend = useCallback(async (message: string) => {
+    const userMsg: ChatMessageData = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: message,
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, userMsg]);
+
+    const newHistory = [...history, { role: 'user', content: message }];
     setLoading(true);
-    setError(null);
+
     try {
-      const data = await searchTables(query);
-      setResult(data);
-    } catch (err) {
-      setError('Failed to search. Make sure the backend is running.');
+      const response = await chatSourceOfTruth(message, history);
+
+      const assistantMsg: ChatMessageData = {
+        id: `assistant-${Date.now()}`,
+        role: 'assistant',
+        content: response.response_text,
+        structuredData: response.structured_data,
+        dataType: response.data_type,
+        timestamp: new Date(),
+      };
+
+      setMessages(prev => [...prev, assistantMsg]);
+      setHistory([...newHistory, { role: 'assistant', content: response.response_text }]);
+    } catch {
+      const errorMsg: ChatMessageData = {
+        id: `error-${Date.now()}`,
+        role: 'assistant',
+        content: 'Sorry, I encountered an error connecting to the backend. Please check that the backend is running and try again.',
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMsg]);
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  // Auto-search from URL query param (from global search)
-  useEffect(() => {
-    const q = searchParams.get('q');
-    if (q) {
-      handleSearch(q);
-    }
-  }, [searchParams, handleSearch]);
+  }, [history]);
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
       {/* Top bar */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <Link href="/" className="flex items-center gap-1 text-sm text-text-secondary hover:text-brand-blue transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -51,58 +65,19 @@ function SourceOfTruthContent() {
           <span className="text-surface-border">|</span>
           <h1 className="text-lg font-bold text-text-primary uppercase tracking-wide">Find the Right Table</h1>
         </div>
-        <div className="flex items-center gap-4">
-          <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Find the Right Table' }]} />
-          <button className="w-8 h-8 rounded-full border border-surface-border flex items-center justify-center text-text-muted hover:bg-gray-50 dark:hover:bg-gray-800">
-            <span className="text-sm font-medium">?</span>
-          </button>
-        </div>
+        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Find the Right Table' }]} />
       </div>
 
-      {/* Search */}
-      <div className="mb-8">
-        <SearchBar onSearch={handleSearch} loading={loading} />
-      </div>
-
-      {/* Loading shimmer */}
-      {loading && (
-        <div className="space-y-4 max-w-3xl mx-auto">
-          <div className="h-8 shimmer rounded-md w-48" />
-          <div className="h-48 shimmer rounded-card" />
-          <div className="h-24 shimmer rounded-card" />
-        </div>
-      )}
-
-      {/* Error */}
-      {error && (
-        <div className="max-w-3xl mx-auto p-4 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-card text-sm text-red-700 dark:text-red-400">
-          {error}
-        </div>
-      )}
-
-      {/* Results */}
-      {result && !loading && (
-        <div className="max-w-3xl mx-auto">
-          <RecommendedTable table={result.recommended} />
-          <OtherTables tables={result.alternatives} />
-          <ConfidenceBadge level={result.confidence} />
-        </div>
-      )}
+      {/* Chat */}
+      <ChatContainer
+        messages={messages}
+        onSend={handleSend}
+        loading={loading}
+        placeholder="Ask me about tables... e.g., 'I need the GCP equivalent of analytics.fact_sales'"
+        renderStructuredData={renderStructuredData}
+        emptyStateMessage="Find the Right Table"
+        emptyStateHint="Ask me in natural language about any table. For example: 'I am looking for a Teradata equivalent table in GCP for analytics.fact_sales' or 'Where can I find customer email data?'"
+      />
     </div>
-  );
-}
-
-export default function SourceOfTruthPage() {
-  return (
-    <Suspense fallback={
-      <div className="max-w-5xl mx-auto px-6 py-8">
-        <div className="space-y-4">
-          <div className="h-8 shimmer rounded-md w-48" />
-          <div className="h-14 shimmer rounded-card max-w-3xl mx-auto" />
-        </div>
-      </div>
-    }>
-      <SourceOfTruthContent />
-    </Suspense>
   );
 }

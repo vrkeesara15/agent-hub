@@ -64,3 +64,28 @@ export async function markAllNotificationsRead() {
     method: 'POST',
   });
 }
+
+// --- Chat endpoints ---
+
+export async function chatSourceOfTruth(message: string, history: { role: string; content: string }[]) {
+  return fetchAPI<import('./types').ChatResponse>('/api/agents/source-of-truth/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message, history }),
+  });
+}
+
+export async function chatDataTriage(message: string, history: { role: string; content: string }[]) {
+  return fetchAPI<import('./types').ChatResponse>('/api/agents/data-triage/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message, history }),
+  });
+}
+
+// --- SQL Optimizer ---
+
+export async function optimizeSQL(inputCode: string) {
+  return fetchAPI<import('./types').OptimizeResponse>('/api/agents/code-accelerator/optimize', {
+    method: 'POST',
+    body: JSON.stringify({ input_code: inputCode }),
+  });
+}

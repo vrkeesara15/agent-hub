@@ -90,3 +90,32 @@ export interface NotificationItem {
   timestamp: string;
   read: boolean;
 }
+
+// --- Chat ---
+
+export interface ChatMessageType {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatResponse {
+  response_text: string;
+  structured_data?: Record<string, unknown> | null;
+  data_type?: string | null;
+}
+
+// --- SQL Optimizer ---
+
+export interface OptimizeIssue {
+  title: string;
+  description: string;
+  suggestion: string;
+}
+
+export interface OptimizeResponse {
+  health_score: number;
+  critical_issues: OptimizeIssue[];
+  warnings: OptimizeIssue[];
+  recommendations: string[];
+  optimized_code: string;
+}

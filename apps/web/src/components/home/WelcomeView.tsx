@@ -27,7 +27,7 @@ const cards = [
         <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" fill="#FDE68A"/>
       </svg>
     ),
-    heading: 'Migrate to the cloud',
+    heading: 'Migrate to Google Cloud',
     subtext: null,
     href: '/agents/code-accelerator',
     pills: ['Tableau\u2192Looker', 'SQL\u2192Airflow', 'Cron\u2192GCP'],

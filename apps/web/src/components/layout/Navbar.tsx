@@ -20,9 +20,14 @@ export function Navbar() {
           <circle cx="12" cy="12" r="1" fill="#4A6CF7"/>
           <path d="M10 9l2 3M14 9l-2 3"/>
         </svg>
-        <span className="text-lg font-bold text-text-primary tracking-tight">
-          AGENT <span className="text-text-primary">HUB</span>
-        </span>
+        <div className="flex flex-col leading-tight">
+          <span className="text-lg font-bold text-text-primary tracking-tight">
+            AGENT <span className="text-text-primary">HUB</span>
+          </span>
+          <span className="text-[9px] font-medium text-text-secondary tracking-widest uppercase">
+            Data Intelligence
+          </span>
+        </div>
       </Link>
 
       {/* Search */}

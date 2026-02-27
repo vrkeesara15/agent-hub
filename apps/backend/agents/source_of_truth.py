@@ -403,6 +403,171 @@ class SourceOfTruthAgent(BaseAgent):
             "confidence": "low",
         }
 
+    async def chat(self, message: str, history: list[dict] = None) -> dict:
+        """Conversational chat interface for table discovery.
+
+        Accepts natural language, searches the KB, and returns a
+        conversational response with optional structured data.
+        """
+        store = get_knowledge_store()
+        history = history or []
+
+        # Extract potential table names / search terms from the message
+        search_terms = self._extract_search_terms(message)
+
+        # Search knowledge base for all extracted terms
+        kb_results = []
+        table_info = None
+        for term in search_terms:
+            results = store.search_tables(term)
+            kb_results.extend(results)
+            info = store.get_table_info(term)
+            if info and not table_info:
+                table_info = info
+
+        # Also try the full message as a search query
+        if not kb_results and not table_info:
+            kb_results = store.search_tables(message)
+
+        # Build context for LLM
+        kb_context = ""
+        if table_info:
+            kb_context += "Direct table match found:\n"
+            for k, v in table_info.items():
+                if v and k != "sources_used":
+                    kb_context += f"  {k}: {v}\n"
+
+        if kb_results:
+            kb_context += f"\nSearch results ({len(kb_results)} tables):\n"
+            for i, row in enumerate(kb_results[:8]):
+                table_name = (
+                    row.get("gcp_table", "")
+                    or row.get("table_name", "")
+                    or row.get("legacy_table", "")
+                )
+                kb_context += f"  {i+1}. {table_name}"
+                for k, v in row.items():
+                    if not k.startswith("_") and v:
+                        kb_context += f"  |  {k}: {v}"
+                kb_context += "\n"
+
+        # Try LLM for conversational response
+        if self.llm.client is not None:
+            chat_system = (
+                self.system_prompt
+                + "\n\nYou are in CHAT mode. Respond conversationally to the user. "
+                "When you find matching tables, include them in your JSON response. "
+                "If the user asks a follow-up, use the conversation history for context.\n\n"
+                f"Knowledge Base Context:\n{kb_context}"
+            )
+
+            messages = []
+            for h in history:
+                messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+            messages.append({"role": "user", "content": message})
+
+            try:
+                import json
+                schema_hint = (
+                    "\n\nRespond with valid JSON:\n"
+                    '{"response_text": "your conversational response", '
+                    '"structured_data": { ...search response data or null }, '
+                    '"data_type": "table_recommendation" or null}'
+                )
+                api_response = self.llm.client.messages.create(
+                    model=self.llm.model,
+                    max_tokens=4096,
+                    system=chat_system + schema_hint,
+                    messages=messages,
+                )
+                text = api_response.content[0].text.strip()
+                if text.startswith("```"):
+                    lines = text.split("\n")
+                    lines = [l for l in lines if not l.strip().startswith("```")]
+                    text = "\n".join(lines)
+                parsed = json.loads(text)
+                return parsed
+            except Exception as exc:
+                logger.warning("Chat LLM call failed: %s", exc)
+
+        # Fallback: build response from KB data without LLM
+        if table_info:
+            search_result = self._build_response_from_info(table_info, store)
+            return {
+                "response_text": self._build_text_response(table_info, search_terms),
+                "structured_data": search_result,
+                "data_type": "table_recommendation",
+            }
+
+        if kb_results:
+            search_result = self._build_response_from_search(
+                search_terms[0] if search_terms else message, kb_results, store
+            )
+            return {
+                "response_text": f"I found {len(kb_results)} matching table(s) in the knowledge base for your query.",
+                "structured_data": search_result,
+                "data_type": "table_recommendation",
+            }
+
+        return {
+            "response_text": (
+                f"I couldn't find any tables matching your query. "
+                f"Try a different table name or check with the data engineering team."
+            ),
+            "structured_data": None,
+            "data_type": None,
+        }
+
+    def _extract_search_terms(self, message: str) -> list[str]:
+        """Extract potential table names from a natural language message."""
+        import re
+        terms = []
+        # Match patterns like schema.table, database.schema.table
+        patterns = [
+            r'`([^`]+)`',
+            r'(?:table|for|of|called|named|equivalent)\s+["\']?(\w+(?:\.\w+){1,2})["\']?',
+            r'(\w+\.\w+(?:\.\w+)?)',
+        ]
+        for pattern in patterns:
+            matches = re.findall(pattern, message, re.IGNORECASE)
+            terms.extend(matches)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for t in terms:
+            t_lower = t.lower().strip()
+            if t_lower not in seen and len(t_lower) > 2:
+                seen.add(t_lower)
+                unique.append(t)
+        return unique
+
+    def _build_text_response(self, info: dict, search_terms: list[str]) -> str:
+        """Build a conversational text response from table info."""
+        table_name = info.get("gcp_table", info.get("table_name", ""))
+        gcp_path = info.get("gcp_full_path", "")
+        project = info.get("gcp_project", "")
+        dataset = info.get("gcp_dataset", "")
+        mod_status = info.get("modernization_status", "")
+
+        parts = [f"I found the table **{table_name}**"]
+        if gcp_path:
+            parts.append(f"in GCP at `{gcp_path}`")
+        if project:
+            parts.append(f"(project: {project}, dataset: {dataset})")
+        parts.append(".")
+
+        if mod_status == "Completed":
+            parts.append("This table has been fully modernized and migrated to BigQuery.")
+        elif mod_status == "In Progress":
+            parts.append("Note: This table's modernization is still in progress.")
+
+        owner = info.get("owner_team", "")
+        if owner:
+            parts.append(f"It's managed by the {owner} team.")
+
+        return " ".join(parts)
+
     def get_sample_response(self) -> dict:
         """Legacy fallback — should not be reached with new KB system."""
         return self._build_not_found_response("unknown")

@@ -2,55 +2,101 @@
 import React, { useState, useCallback } from 'react';
 import Link from 'next/link';
 import { Breadcrumb } from '@/components/layout/Breadcrumb';
-import { FileUpload } from '@/components/data-triage/FileUpload';
-import { ScanResults } from '@/components/data-triage/ScanResults';
-import { IssuesPanel } from '@/components/data-triage/IssuesPanel';
-import { ActionBar } from '@/components/data-triage/ActionBar';
-import { scanCode, fixTable } from '@/lib/api';
-import { ScanResponse, FixResponse } from '@/lib/types';
+import { ChatContainer } from '@/components/chat/ChatContainer';
+import { ChatMessageData } from '@/components/chat/ChatMessage';
+import { renderStructuredData } from '@/components/chat/StructuredDataRenderer';
+import { chatDataTriage } from '@/lib/api';
 
 export default function DataTriagePage() {
-  const [result, setResult] = useState<ScanResponse | null>(null);
+  const [messages, setMessages] = useState<ChatMessageData[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [fixResult, setFixResult] = useState<FixResponse | null>(null);
-  const [scannedContent, setScannedContent] = useState('');
+  const [history, setHistory] = useState<{ role: string; content: string }[]>([]);
 
-  const handleScan = useCallback(async (content: string, filename: string) => {
+  const handleSend = useCallback(async (message: string) => {
+    const userMsg: ChatMessageData = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: message,
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, userMsg]);
+
+    const newHistory = [...history, { role: 'user', content: message }];
     setLoading(true);
-    setError(null);
-    setResult(null);
-    setFixResult(null);
-    setScannedContent(content);
+
     try {
-      const data = await scanCode(content, filename);
-      setResult(data);
-    } catch (err) {
-      setError('Failed to scan. Make sure the backend is running.');
+      const response = await chatDataTriage(message, history);
+
+      const assistantMsg: ChatMessageData = {
+        id: `assistant-${Date.now()}`,
+        role: 'assistant',
+        content: response.response_text,
+        structuredData: response.structured_data,
+        dataType: response.data_type,
+        timestamp: new Date(),
+      };
+
+      setMessages(prev => [...prev, assistantMsg]);
+      setHistory([...newHistory, { role: 'assistant', content: response.response_text }]);
+    } catch {
+      const errorMsg: ChatMessageData = {
+        id: `error-${Date.now()}`,
+        role: 'assistant',
+        content: 'Sorry, I encountered an error connecting to the backend. Please check that the backend is running and try again.',
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMsg]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [history]);
 
-  const handleFix = useCallback(async (table: string) => {
+  const handleFileAttach = useCallback(async (content: string, filename: string) => {
+    const userMsg: ChatMessageData = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: `[Attached file: ${filename}]\n\nPlease scan this SQL file for table health issues.`,
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, userMsg]);
+
+    setLoading(true);
+
     try {
-      const data = await fixTable(table, scannedContent);
-      setFixResult(data);
-    } catch (err) {
-      // silently fail
-    }
-  }, [scannedContent]);
+      const response = await chatDataTriage(content, history);
 
-  const handleScanAgain = () => {
-    setResult(null);
-    setFixResult(null);
-    setError(null);
-  };
+      const assistantMsg: ChatMessageData = {
+        id: `assistant-${Date.now()}`,
+        role: 'assistant',
+        content: response.response_text,
+        structuredData: response.structured_data,
+        dataType: response.data_type,
+        timestamp: new Date(),
+      };
+
+      setMessages(prev => [...prev, assistantMsg]);
+      setHistory(prev => [
+        ...prev,
+        { role: 'user', content: `Scan file ${filename}` },
+        { role: 'assistant', content: response.response_text },
+      ]);
+    } catch {
+      const errorMsg: ChatMessageData = {
+        id: `error-${Date.now()}`,
+        role: 'assistant',
+        content: 'Sorry, I encountered an error scanning the file. Please check the backend and try again.',
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMsg]);
+    } finally {
+      setLoading(false);
+    }
+  }, [history]);
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
       {/* Top bar */}
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <Link href="/" className="flex items-center gap-1 text-sm text-text-secondary hover:text-brand-blue transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -61,59 +107,21 @@ export default function DataTriagePage() {
           <span className="text-surface-border">|</span>
           <h1 className="text-lg font-bold text-text-primary uppercase tracking-wide">Check Data Health</h1>
         </div>
-        <Breadcrumb items={[
-          { label: 'Home', href: '/' },
-          { label: 'Data Health Check' },
-          ...(result ? [{ label: result.filename }] : []),
-        ]} />
+        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Data Health Check' }]} />
       </div>
 
-      {/* Upload section (before results) */}
-      {!result && !loading && (
-        <FileUpload onScan={handleScan} loading={loading} />
-      )}
-
-      {/* Loading shimmer */}
-      {loading && (
-        <div className="space-y-4">
-          <div className="h-6 shimmer rounded-md w-64" />
-          <div className="h-10 shimmer rounded-md w-48" />
-          <div className="h-64 shimmer rounded-card" />
-        </div>
-      )}
-
-      {/* Error */}
-      {error && (
-        <div className="p-4 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-card text-sm text-red-700 dark:text-red-400">
-          {error}
-        </div>
-      )}
-
-      {/* Results */}
-      {result && !loading && (
-        <div>
-          <ScanResults
-            filename={result.filename}
-            tablesFound={result.tables_found}
-            tables={result.tables}
-          />
-          <IssuesPanel issues={result.issues} onFix={handleFix} />
-
-          {/* Fix result modal/card */}
-          {fixResult && (
-            <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-card">
-              <h4 className="text-sm font-bold text-text-primary mb-2">Fix Suggestion</h4>
-              <p className="text-sm text-text-secondary mb-3">{fixResult.explanation}</p>
-              <div className="font-mono text-sm space-y-1">
-                <div className="text-red-500 line-through">{fixResult.original_line}</div>
-                <div className="text-green-600">{fixResult.fixed_line}</div>
-              </div>
-            </div>
-          )}
-
-          <ActionBar onScanAgain={handleScanAgain} />
-        </div>
-      )}
+      {/* Chat */}
+      <ChatContainer
+        messages={messages}
+        onSend={handleSend}
+        onFileAttach={handleFileAttach}
+        loading={loading}
+        placeholder="Ask about table health... e.g., 'Check health of dim_customer' or paste SQL code"
+        showFileAttach
+        renderStructuredData={renderStructuredData}
+        emptyStateMessage="Check Data Health"
+        emptyStateHint="Ask me to check the health of any table, paste SQL code to scan for issues, or attach a .sql file. For example: 'What is the status of analytics.fact_sales?' or 'Check health of dim_customer'"
+      />
     </div>
   );
 }

@@ -7,7 +7,7 @@ from fastapi import APIRouter
 
 from agents.code_accelerator import CodeAcceleratorAgent
 from agents.data_triage import DataTriageAgent
-from models.schemas import ConvertRequest, FixRequest, ScanRequest
+from models.schemas import ConvertRequest, FixRequest, ScanRequest, OptimizeRequest
 
 router = APIRouter(tags=["data-triage", "code-accelerator"])
 
@@ -71,6 +71,24 @@ async def code_accelerator_convert(request: ConvertRequest):
         "id": str(uuid.uuid4())[:8],
         "agent": "Code Accelerator",
         "message": f"Converted code ({request.mode}): {request.source_format or 'auto-detect'} migration",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    if len(activity_log) > 50:
+        activity_log[:] = activity_log[-50:]
+
+    return result
+
+
+@router.post("/api/agents/code-accelerator/optimize")
+async def code_accelerator_optimize(request: OptimizeRequest):
+    agent = CodeAcceleratorAgent()
+    result = await agent.optimize(input_code=request.input_code)
+
+    from main import activity_log
+    activity_log.append({
+        "id": str(uuid.uuid4())[:8],
+        "agent": "Code Accelerator",
+        "message": f"SQL optimization: health score {result.get('health_score', 'N/A')}",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
     if len(activity_log) > 50:

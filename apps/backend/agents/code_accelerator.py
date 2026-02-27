@@ -107,6 +107,31 @@ class CodeAcceleratorAgent(BaseAgent):
                     f"(modernized: {m['modernized']})\n"
                 )
 
+        # Build mode-specific LLM instructions
+        mode_instructions = ""
+        if "tableau" in mode.lower() or "looker" in mode.lower():
+            mode_instructions = (
+                "\n\nIMPORTANT: This is a Tableau to Looker conversion. "
+                "The output_code MUST be in LookML format. Convert the SQL into a LookML view "
+                "with dimensions, measures, and derived tables as appropriate. Example LookML:\n"
+                "view: view_name {\n"
+                "  sql_table_name: `project.dataset.table` ;;\n"
+                "  dimension: col_name {\n"
+                "    type: string\n"
+                "    sql: ${TABLE}.col_name ;;\n"
+                "  }\n"
+                "  measure: count {\n"
+                "    type: count\n"
+                "  }\n"
+                "}\n"
+            )
+        elif "teradata" in mode.lower():
+            mode_instructions = (
+                "\n\nIMPORTANT: Convert ALL Teradata-specific syntax to BigQuery equivalents AND "
+                "replace ALL legacy table references with their GCP BigQuery fully-qualified names. "
+                "Both syntax AND table names must be converted."
+            )
+
         # Try LLM for intelligent conversion
         if self.llm.client is not None:
             result = await self.call_llm(
@@ -116,6 +141,7 @@ class CodeAcceleratorAgent(BaseAgent):
                     f"Source format: {source_format or 'auto-detect'}\n\n"
                     f"```\n{input_code}\n```"
                     f"{kb_context}"
+                    f"{mode_instructions}"
                 ),
                 response_schema={
                     "output_code": "string",
@@ -139,6 +165,8 @@ class CodeAcceleratorAgent(BaseAgent):
                 return result
 
         # No LLM — do rule-based conversion using knowledge base
+        if "tableau" in mode.lower() or "looker" in mode.lower():
+            return self._rule_based_lookml_convert(input_code, table_mappings)
         return self._rule_based_convert(mode, input_code, table_mappings)
 
     def _rule_based_convert(
@@ -232,6 +260,76 @@ class CodeAcceleratorAgent(BaseAgent):
             "completion_pct": completion,
         }
 
+    def _rule_based_lookml_convert(self, input_code: str, table_mappings: list[dict]) -> dict:
+        """Convert SQL to basic LookML format without LLM."""
+        # Extract column names from SELECT
+        columns = []
+        select_match = re.search(r'SELECT\s+([\s\S]*?)\s+FROM', input_code, re.IGNORECASE)
+        if select_match:
+            cols_str = select_match.group(1)
+            for col in cols_str.split(","):
+                col = col.strip()
+                # Handle aliases
+                alias_match = re.search(r'(?:AS\s+)?(\w+)\s*$', col, re.IGNORECASE)
+                if alias_match:
+                    columns.append(alias_match.group(1))
+
+        # Determine table name
+        table_name = "my_table"
+        table_path = "project.dataset.table"
+        from_match = re.search(r'FROM\s+[`"]?(\w+(?:\.\w+)*)[`"]?', input_code, re.IGNORECASE)
+        if from_match:
+            table_name = from_match.group(1).split(".")[-1].lower()
+        if table_mappings:
+            table_path = table_mappings[0].get("gcp_path", table_path)
+            table_name = table_mappings[0].get("gcp_table", table_name)
+
+        # Build LookML
+        lookml_lines = [f"view: {table_name} {{"]
+        lookml_lines.append(f"  sql_table_name: `{table_path}` ;;")
+        lookml_lines.append("")
+
+        changes = []
+        for col in columns:
+            col_clean = col.lower().strip()
+            if col_clean == "*":
+                continue
+            dim_type = "string"
+            if any(kw in col_clean for kw in ("id", "count", "num", "amount", "qty", "revenue", "price")):
+                dim_type = "number"
+            if any(kw in col_clean for kw in ("date", "time", "created", "updated")):
+                dim_type = "date" if "time" not in col_clean else "date_time"
+
+            lookml_lines.append(f"  dimension: {col_clean} {{")
+            lookml_lines.append(f"    type: {dim_type}")
+            lookml_lines.append(f"    sql: ${{TABLE}}.{col_clean} ;;")
+            lookml_lines.append("  }")
+            lookml_lines.append("")
+            changes.append({
+                "original": f"Column: {col}",
+                "converted": f"dimension: {col_clean} (type: {dim_type})",
+                "explanation": f"SQL column mapped to LookML dimension",
+            })
+
+        lookml_lines.append("  measure: count {")
+        lookml_lines.append("    type: count")
+        lookml_lines.append("  }")
+        lookml_lines.append("}")
+
+        lookml_output = "\n".join(lookml_lines)
+
+        return {
+            "output_code": lookml_output,
+            "changes": changes,
+            "warnings": [
+                {
+                    "type": "lookml_basic",
+                    "message": "This is a basic LookML conversion. Review dimension types, add measures, and adjust for your Looker model.",
+                }
+            ],
+            "completion_pct": 60,
+        }
+
     def _build_empty_response(self, mode: str) -> dict:
         """Response when no input code is provided."""
         return {
@@ -244,6 +342,136 @@ class CodeAcceleratorAgent(BaseAgent):
                 }
             ],
             "completion_pct": 0,
+        }
+
+    async def optimize(self, input_code: str) -> dict:
+        """Analyze SQL for performance and return health assessment."""
+        if not input_code or not input_code.strip():
+            return {
+                "health_score": 0,
+                "critical_issues": [],
+                "warnings": [{"title": "No Input", "description": "No SQL was provided.", "suggestion": "Paste your SQL to analyze."}],
+                "recommendations": [],
+                "optimized_code": "",
+            }
+
+        # Try LLM for intelligent analysis
+        if self.llm.client is not None:
+            optimize_prompt = """You are a BigQuery SQL performance expert. Analyze the given SQL query and return:
+1. A health_score (0-100, where 100 is perfectly optimized)
+2. critical_issues: serious performance problems (each with title, description, suggestion)
+3. warnings: minor issues or best practice violations (each with title, description, suggestion)
+4. recommendations: general optimization tips as strings
+5. optimized_code: the optimized version of the SQL
+
+Focus on: partition pruning, clustering usage, SELECT *, unnecessary JOINs,
+subquery optimization, window function efficiency, data skew, and BigQuery best practices.
+
+Respond with valid JSON matching this schema:
+{
+  "health_score": integer,
+  "critical_issues": [{"title": "string", "description": "string", "suggestion": "string"}],
+  "warnings": [{"title": "string", "description": "string", "suggestion": "string"}],
+  "recommendations": ["string"],
+  "optimized_code": "string"
+}"""
+            try:
+                import json
+                api_response = self.llm.client.messages.create(
+                    model=self.llm.model,
+                    max_tokens=4096,
+                    system=optimize_prompt,
+                    messages=[{"role": "user", "content": f"Analyze this SQL:\n```sql\n{input_code}\n```"}],
+                )
+                text = api_response.content[0].text.strip()
+                if text.startswith("```"):
+                    lines = text.split("\n")
+                    lines = [l for l in lines if not l.strip().startswith("```")]
+                    text = "\n".join(lines)
+                return json.loads(text)
+            except Exception as exc:
+                logger.warning("Optimize LLM call failed: %s", exc)
+
+        # Rule-based fallback
+        return self._rule_based_optimize(input_code)
+
+    def _rule_based_optimize(self, input_code: str) -> dict:
+        """Basic rule-based SQL optimization analysis."""
+        critical = []
+        warnings = []
+        recommendations = []
+        score = 80
+
+        code_upper = input_code.upper()
+
+        if "SELECT *" in code_upper:
+            critical.append({
+                "title": "SELECT * Usage",
+                "description": "Using SELECT * fetches all columns, increasing data scanned and cost.",
+                "suggestion": "Specify only the columns you need: SELECT col1, col2, col3 FROM ...",
+            })
+            score -= 15
+
+        if "ORDER BY" in code_upper and "LIMIT" not in code_upper:
+            warnings.append({
+                "title": "ORDER BY Without LIMIT",
+                "description": "Sorting entire result sets is expensive on large tables.",
+                "suggestion": "Add a LIMIT clause or remove ORDER BY if not needed.",
+            })
+            score -= 5
+
+        if code_upper.count("JOIN") > 3:
+            warnings.append({
+                "title": "Multiple JOINs",
+                "description": f"Query has {code_upper.count('JOIN')} JOINs which may cause performance issues.",
+                "suggestion": "Consider materializing intermediate results or using CTEs.",
+            })
+            score -= 10
+
+        if "WHERE" not in code_upper and "FROM" in code_upper:
+            critical.append({
+                "title": "No WHERE Clause",
+                "description": "Full table scan without filtering — expensive on large tables.",
+                "suggestion": "Add WHERE filters, especially on partition columns.",
+            })
+            score -= 20
+
+        if "CROSS JOIN" in code_upper:
+            critical.append({
+                "title": "CROSS JOIN Detected",
+                "description": "CROSS JOINs produce cartesian products and are very expensive.",
+                "suggestion": "Replace with an appropriate INNER/LEFT JOIN with a ON condition.",
+            })
+            score -= 20
+
+        if "NOT IN" in code_upper:
+            warnings.append({
+                "title": "NOT IN Subquery",
+                "description": "NOT IN with subqueries can be slow and has NULL handling issues.",
+                "suggestion": "Use NOT EXISTS or LEFT JOIN ... WHERE key IS NULL instead.",
+            })
+            score -= 5
+
+        if "DISTINCT" in code_upper:
+            warnings.append({
+                "title": "DISTINCT Usage",
+                "description": "DISTINCT forces deduplication which can be expensive.",
+                "suggestion": "Check if DISTINCT is truly needed or if the data model can be improved.",
+            })
+            score -= 3
+
+        recommendations.append("Use partitioned tables and filter on partition columns in WHERE clauses.")
+        recommendations.append("Leverage clustered tables to improve filter and join performance.")
+        recommendations.append("Avoid SELECT * — specify only needed columns to reduce data scanned.")
+
+        score = max(10, min(100, score))
+
+        return {
+            "health_score": score,
+            "critical_issues": critical,
+            "warnings": warnings,
+            "recommendations": recommendations,
+            "optimized_code": input_code,  # Rule-based can't rewrite, return original
         }
 
     def get_sample_response(self) -> dict:
