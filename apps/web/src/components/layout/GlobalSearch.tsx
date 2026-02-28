@@ -12,25 +12,32 @@ interface SearchItem {
 
 const searchItems: SearchItem[] = [
   {
-    label: 'Source of Truth Finder',
-    description: 'Find the right table across data sources',
+    label: 'Object Iq',
+    description: 'Smart object discovery across data sources',
     href: '/agents/source-of-truth',
     category: 'agent',
-    keywords: ['table', 'search', 'find', 'sql', 'bigquery', 'data', 'source', 'truth', 'dimension', 'customer'],
+    keywords: ['table', 'search', 'find', 'sql', 'bigquery', 'data', 'source', 'truth', 'dimension', 'customer', 'object', 'iq', 'discovery'],
   },
   {
-    label: 'Code Accelerator',
+    label: 'Accelerated Cloud Migration',
     description: 'Convert legacy SQL to modern cloud code',
     href: '/agents/code-accelerator',
     category: 'agent',
-    keywords: ['convert', 'migrate', 'teradata', 'airflow', 'sql', 'code', 'tableau', 'looker', 'bigquery', 'legacy'],
+    keywords: ['convert', 'migrate', 'teradata', 'airflow', 'sql', 'code', 'tableau', 'looker', 'bigquery', 'legacy', 'accelerator', 'launchpad'],
   },
   {
-    label: 'Data Triage & Monitoring',
+    label: 'Data Health & Observability',
     description: 'Scan pipelines for issues and get fixes',
     href: '/agents/data-triage',
     category: 'agent',
-    keywords: ['scan', 'triage', 'monitor', 'health', 'alert', 'fix', 'pipeline', 'issue', 'deprecated'],
+    keywords: ['scan', 'triage', 'monitor', 'health', 'alert', 'fix', 'pipeline', 'issue', 'deprecated', 'datalens', 'observability'],
+  },
+  {
+    label: 'Informatica Migration',
+    description: 'Convert Informatica PowerCenter XML to GCP',
+    href: '/agents/informatica-migration',
+    category: 'agent',
+    keywords: ['informatica', 'xml', 'powerCenter', 'migration', 'bigquery', 'airflow', 'dag', 'scd', 'merge', 'etl'],
   },
   {
     label: 'Admin & Settings',
@@ -90,10 +97,10 @@ export function GlobalSearch() {
       item.keywords.some((kw) => kw.includes(q))
     );
 
-    // Always add a "Search Source of Truth" action if query >= 2 chars
+    // Always add a "Search Object IQ" action if query >= 2 chars
     if (query.trim().length >= 2) {
       matched.push({
-        label: `Search "${query.trim()}" in Source of Truth`,
+        label: `Search "${query.trim()}" in Object Iq`,
         description: 'Find tables matching this query',
         href: `/agents/source-of-truth?q=${encodeURIComponent(query.trim())}`,
         category: 'action',
@@ -183,7 +190,7 @@ export function GlobalSearch() {
                 <p className="text-sm font-medium text-text-primary truncate">{item.label}</p>
                 <p className="text-xs text-text-muted truncate">{item.description}</p>
               </div>
-              <span className="text-[10px] uppercase tracking-wider text-text-muted font-medium flex-shrink-0">
+              <span className="text-[10px] tracking-wider text-text-muted font-medium flex-shrink-0">
                 {categoryLabels[item.category]}
               </span>
             </button>

@@ -4,7 +4,7 @@ import { DashboardView } from '@/components/home/DashboardView';
 import { WelcomeView } from '@/components/home/WelcomeView';
 
 export default function HomePage() {
-  const [view, setView] = useState<'dashboard' | 'welcome'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'welcome'>('welcome');
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">

@@ -21,7 +21,7 @@ export function AgentCard({ title, href, icon, status, children }: AgentCardProp
           {icon}
         </div>
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          <h3 className="text-sm font-bold text-text-primary tracking-wide uppercase">{title}</h3>
+          <h3 className="text-sm font-bold text-text-primary tracking-wide">{title}</h3>
           <StatusDot status={status} />
         </div>
       </div>

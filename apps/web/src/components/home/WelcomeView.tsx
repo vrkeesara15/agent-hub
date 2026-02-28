@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/Button';
 
 const cards = [
   {
-    tag: 'FIND THE RIGHT TABLE',
+    tag: 'Smart Object Discovery',
     bgClass: 'bg-blue-50 dark:bg-blue-950',
     icon: (
       <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#EF4444" strokeWidth="1.5">
@@ -20,20 +20,20 @@ const cards = [
     pills: null,
   },
   {
-    tag: 'CONVERT YOUR CODE',
+    tag: 'Gcp Launchpad',
     bgClass: 'bg-green-50 dark:bg-green-950',
     icon: (
       <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" strokeWidth="1.5">
         <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" fill="#FDE68A"/>
       </svg>
     ),
-    heading: 'Migrate to Google Cloud',
+    heading: 'Accelerated Cloud Migration',
     subtext: null,
     href: '/agents/code-accelerator',
-    pills: ['Tableau\u2192Looker', 'SQL\u2192Airflow', 'Cron\u2192GCP'],
+    pills: ['Teradata\u2192BQ', 'Tableau\u2192Looker', 'SQL Optimizer', 'Informatica\u2192GCP', 'NL\u2192DAG'],
   },
   {
-    tag: 'CHECK DATA HEALTH',
+    tag: 'DataLens',
     bgClass: 'bg-purple-50 dark:bg-purple-950',
     icon: (
       <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#7C3AED" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -45,21 +45,6 @@ const cards = [
     subtext: 'Find problems before they break',
     href: '/agents/data-triage',
     pills: null,
-  },
-  {
-    tag: 'INFORMATICA MIGRATION',
-    bgClass: 'bg-indigo-50 dark:bg-indigo-950',
-    icon: (
-      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#6366F1" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-        <polyline points="14 2 14 8 20 8"/>
-        <path d="M8 13h2l2 3 2-6 2 3h2"/>
-      </svg>
-    ),
-    heading: 'Convert Informatica to GCP',
-    subtext: null,
-    href: '/agents/informatica-migration',
-    pills: ['XML→BigQuery', 'Airflow DAG', 'SCD MERGE'],
   },
 ];
 
@@ -90,10 +75,10 @@ export function WelcomeView() {
       </h1>
 
       {/* Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {cards.map((card) => (
-          <div key={card.tag} className={`${card.bgClass} rounded-card p-6 border border-transparent`}>
-            <span className="inline-block text-[10px] font-bold uppercase tracking-wider text-text-secondary bg-white/70 dark:bg-black/30 px-2 py-1 rounded mb-4">
+          <div key={card.tag} className={`${card.bgClass} rounded-card p-6 border border-transparent flex flex-col`}>
+            <span className="inline-block self-start text-[10px] font-bold tracking-wider text-text-secondary bg-white/70 dark:bg-black/30 px-2 py-1 rounded mb-4">
               {card.tag}
             </span>
             <div className="mb-3">{card.icon}</div>
@@ -110,16 +95,18 @@ export function WelcomeView() {
                 ))}
               </div>
             )}
-            <Link href={card.href}>
-              <Button variant="primary" size="md">Get Started</Button>
-            </Link>
+            <div className="mt-auto pt-4">
+              <Link href={card.href}>
+                <Button variant="primary" size="md">Get Started</Button>
+              </Link>
+            </div>
           </div>
         ))}
       </div>
 
       {/* Recent Activity */}
       <div>
-        <h2 className="text-sm font-bold text-text-primary tracking-wide uppercase mb-4">
+        <h2 className="text-sm font-bold text-text-primary tracking-wide mb-4">
           Recent Activity
         </h2>
         <div className="space-y-3">

@@ -89,6 +89,7 @@ from api.chat import router as chat_router
 from api.knowledge import router as knowledge_router
 from api.triage import router as triage_router
 from api.informatica import router as informatica_router
+from api.nl_to_dag import router as nl_to_dag_router
 
 app.include_router(health_router)
 app.include_router(agents_router)
@@ -96,6 +97,7 @@ app.include_router(chat_router)
 app.include_router(knowledge_router)
 app.include_router(triage_router)
 app.include_router(informatica_router)
+app.include_router(nl_to_dag_router)
 
 
 # ---------------------------------------------------------------------------

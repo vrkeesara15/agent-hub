@@ -63,9 +63,9 @@ export default function SourceOfTruthPage() {
             Back
           </Link>
           <span className="text-surface-border">|</span>
-          <h1 className="text-lg font-bold text-text-primary uppercase tracking-wide">Find the Right Table</h1>
+          <h1 className="text-lg font-bold text-text-primary tracking-wide">Smart Object Discovery</h1>
         </div>
-        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Find the Right Table' }]} />
+        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Smart Object Discovery' }]} />
       </div>
 
       {/* Chat */}
@@ -75,7 +75,7 @@ export default function SourceOfTruthPage() {
         loading={loading}
         placeholder="Ask me about tables... e.g., 'I need the GCP equivalent of analytics.fact_sales'"
         renderStructuredData={renderStructuredData}
-        emptyStateMessage="Find the Right Table"
+        emptyStateMessage="Smart Object Discovery"
         emptyStateHint="Ask me in natural language about any table. For example: 'I am looking for a Teradata equivalent table in GCP for analytics.fact_sales' or 'Where can I find customer email data?'"
       />
     </div>

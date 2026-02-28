@@ -155,3 +155,14 @@ export interface InformaticaMigrationResponse {
   };
   error?: string;
 }
+
+// --- NL to DAG ---
+
+export interface NLToDAGResponse {
+  dag_code: string;
+  dag_id: string;
+  description: string;
+  used_llm: boolean;
+  filename: string;
+  error?: string;
+}

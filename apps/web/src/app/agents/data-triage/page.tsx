@@ -105,9 +105,9 @@ export default function DataTriagePage() {
             Back
           </Link>
           <span className="text-surface-border">|</span>
-          <h1 className="text-lg font-bold text-text-primary uppercase tracking-wide">Check Data Health</h1>
+          <h1 className="text-lg font-bold text-text-primary tracking-wide">DataLens</h1>
         </div>
-        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Data Health Check' }]} />
+        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'DataLens' }]} />
       </div>
 
       {/* Chat */}
@@ -119,7 +119,7 @@ export default function DataTriagePage() {
         placeholder="Ask about table health... e.g., 'Check health of dim_customer' or paste SQL code"
         showFileAttach
         renderStructuredData={renderStructuredData}
-        emptyStateMessage="Check Data Health"
+        emptyStateMessage="DataLens"
         emptyStateHint="Ask me to check the health of any table, paste SQL code to scan for issues, or attach a .sql file. For example: 'What is the status of analytics.fact_sales?' or 'Check health of dim_customer'"
       />
     </div>

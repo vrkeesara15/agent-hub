@@ -313,16 +313,16 @@ export default function InformaticaMigrationPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
-          <Link href="/" className="flex items-center gap-1 text-sm text-text-secondary hover:text-brand-blue transition-colors">
+          <Link href="/agents/code-accelerator" className="flex items-center gap-1 text-sm text-text-secondary hover:text-brand-blue transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M19 12H5M12 19l-7-7 7-7"/>
             </svg>
-            Back
+            Back to Gcp Launchpad
           </Link>
           <span className="text-surface-border">|</span>
-          <h1 className="text-lg font-bold text-text-primary uppercase tracking-wide">Informatica Migration</h1>
+          <h1 className="text-lg font-bold text-text-primary tracking-wide">Informatica Migration</h1>
         </div>
-        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Informatica Migration' }]} />
+        <Breadcrumb items={[{ label: 'Home', href: '/' }, { label: 'Gcp Launchpad', href: '/agents/code-accelerator' }, { label: 'Informatica Migration' }]} />
       </div>
 
       {/* Info Banner */}

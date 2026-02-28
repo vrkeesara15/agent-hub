@@ -98,3 +98,12 @@ export async function migrateInformatica(xmlContent: string, filename: string) {
     body: JSON.stringify({ xml_content: xmlContent, filename }),
   });
 }
+
+// --- NL to DAG ---
+
+export async function generateDAG(description: string) {
+  return fetchAPI<import('./types').NLToDAGResponse>('/api/agents/nl-to-dag/generate', {
+    method: 'POST',
+    body: JSON.stringify({ description }),
+  });
+}

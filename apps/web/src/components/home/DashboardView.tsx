@@ -41,7 +41,7 @@ export function DashboardView() {
       {/* Agent Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <AgentCard
-          title="Source of Truth Finder"
+          title="Object Iq"
           href="/agents/source-of-truth"
           icon={<DatabaseIcon />}
           status="active"
@@ -59,26 +59,32 @@ export function DashboardView() {
         </AgentCard>
 
         <AgentCard
-          title="Code Accelerator"
+          title="Accelerated Cloud Migration"
           href="/agents/code-accelerator"
           icon={<CodeIcon />}
           status="active"
         >
           <div className="flex flex-wrap gap-2">
             <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
+              Teradata→BQ
+            </span>
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
               Tableau→Looker
             </span>
             <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
-              Teradata→Airflow
+              SQL Optimizer
             </span>
             <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
-              Cron→GCP
+              Informatica→GCP
+            </span>
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
+              NL→DAG
             </span>
           </div>
         </AgentCard>
 
         <AgentCard
-          title="Data Triage & Monitoring"
+          title="Data Health & Observability"
           href="/agents/data-triage"
           icon={<MonitorIcon />}
           status="active"

@@ -129,3 +129,9 @@ class OptimizeResponse(BaseModel):
 class InformaticaMigrateRequest(BaseModel):
     xml_content: str
     filename: str = "workflow.xml"
+
+
+# --- NL to DAG ---
+
+class NLToDAGRequest(BaseModel):
+    description: str
