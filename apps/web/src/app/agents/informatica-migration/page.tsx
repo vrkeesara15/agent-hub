@@ -154,8 +154,12 @@ export default function InformaticaMigrationPage() {
           setAdvancedResult(null);
         }
       }
-    } catch {
-      setError('Failed to migrate. Make sure the backend is running.');
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError('Migration timed out. The workflow may be too large for a single request. Try splitting it into smaller XML files.');
+      } else {
+        setError('Failed to migrate. Make sure the backend is running.');
+      }
     } finally {
       setLoading(false);
     }

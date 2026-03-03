@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import xml.etree.ElementTree as ET
@@ -332,11 +333,18 @@ class InformaticaMigrationAgent(BaseAgent):
                 "}"
             )
 
-            api_response = self.llm.client.messages.create(
-                model=self.llm.model,
-                max_tokens=8192,
-                system=self.system_prompt,
-                messages=[{"role": "user", "content": prompt}],
+            # Run sync Anthropic SDK call in thread pool to avoid blocking event loop
+            def _sync_call():
+                return self.llm.client.messages.create(
+                    model=self.llm.model,
+                    max_tokens=8192,
+                    system=self.system_prompt,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+
+            api_response = await asyncio.wait_for(
+                asyncio.to_thread(_sync_call),
+                timeout=120,
             )
             text = api_response.content[0].text.strip()
             if text.startswith("```"):

@@ -102,10 +102,21 @@ export async function migrateInformatica(xmlContent: string, filename: string) {
 // --- Informatica Migration Advanced ---
 
 export async function migrateInformaticaAdvanced(xmlContent: string, filename: string) {
-  return fetchAPI<import('./types').InformaticaAdvancedMigrationResponse>('/api/agents/informatica-migration/migrate-advanced', {
-    method: 'POST',
-    body: JSON.stringify({ xml_content: xmlContent, filename }),
-  });
+  // Advanced migration makes per-mapping LLM calls and needs a longer timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 min
+  try {
+    return await fetchAPI<import('./types').InformaticaAdvancedMigrationResponse>(
+      '/api/agents/informatica-migration/migrate-advanced',
+      {
+        method: 'POST',
+        body: JSON.stringify({ xml_content: xmlContent, filename }),
+        signal: controller.signal,
+      },
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // --- NL to DAG ---

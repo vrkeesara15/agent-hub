@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from functools import partial
 from typing import Optional
 
 from agents.base import BaseAgent
@@ -679,6 +681,16 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "used_llm": used_llm,
         }
 
+    def _sync_llm_call(self, system: str, prompt: str) -> str:
+        """Synchronous LLM call to run in a thread pool."""
+        api_response = self.llm.client.messages.create(
+            model=self.llm.model,
+            max_tokens=4096,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return api_response.content[0].text.strip()
+
     async def _llm_convert_mapping(
         self, mapping_name: str, group: dict,
         connector_graph: dict, parameters: list,
@@ -699,13 +711,11 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 f'{{"sql": "-- Complete BigQuery SQL for mapping {mapping_name}"}}'
             )
 
-            api_response = self.llm.client.messages.create(
-                model=self.llm.model,
-                max_tokens=4096,
-                system=self.system_prompt,
-                messages=[{"role": "user", "content": prompt}],
+            # Run sync Anthropic SDK call in thread pool to avoid blocking event loop
+            text = await asyncio.wait_for(
+                asyncio.to_thread(self._sync_llm_call, self.system_prompt, prompt),
+                timeout=120,  # 2 min per mapping
             )
-            text = api_response.content[0].text.strip()
             if text.startswith("```"):
                 lines = text.split("\n")
                 lines = [ln for ln in lines if not ln.strip().startswith("```")]
@@ -713,6 +723,9 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
             result = json.loads(text)
             return result.get("sql", "")
+        except asyncio.TimeoutError:
+            logger.warning("LLM mapping conversion timed out for %s", mapping_name)
+            return None
         except Exception as exc:
             logger.warning("LLM mapping conversion failed for %s: %s", mapping_name, exc)
             return None
