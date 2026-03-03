@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import xml.etree.ElementTree as ET
-from collections import defaultdict
+from collections import defaultdict, deque
 from functools import partial
 from typing import Optional
 
@@ -142,77 +142,79 @@ EXPRESSION_CONVERSIONS = {
     r'\bMINUS\b': "EXCEPT DISTINCT",
 }
 
+# Pre-compile all regex patterns ONCE at module load (avoids re-compiling 480K+ times)
+_COMPILED_CONVERSIONS = [
+    (re.compile(pattern, re.IGNORECASE), replacement)
+    for pattern, replacement in EXPRESSION_CONVERSIONS.items()
+]
+_PARAM_RE = re.compile(r'\$\$(\w+)')
+
+# Expression conversion cache — many expressions repeat across mappings
+_expression_cache: dict[str, str] = {}
+
 
 class InformaticaMigrationAdvancedAgent(BaseAgent):
     name = "Informatica Migration Advanced"
     slug = "informatica-migration-advanced"
     system_prompt = ADVANCED_SYSTEM_PROMPT
 
+    def _heavy_parse_and_analyze(self, xml_content: str) -> dict:
+        """CPU-bound: parse XML, build graph, analyze. Runs in thread pool."""
+        parsed = self._parse_xml(xml_content)
+        if parsed.get("error"):
+            return {"parsed": parsed, "error": True}
+
+        connector_graph = self._build_connector_graph(parsed)
+        parameters = self._extract_parameters(parsed)
+        analysis = self._analyze_transformations(parsed)
+        mapping_groups = self._group_by_mapping(parsed, connector_graph)
+
+        return {
+            "parsed": parsed,
+            "connector_graph": connector_graph,
+            "parameters": parameters,
+            "analysis": analysis,
+            "mapping_groups": mapping_groups,
+            "error": False,
+        }
+
     async def migrate(self, xml_content: str, filename: str = "workflow.xml") -> dict:
         """Main entry: parse, build connector graph, process per-mapping, score."""
 
-        # Step 1: Parse XML
-        parsed = self._parse_xml(xml_content)
-        if parsed.get("error"):
-            return parsed
+        # Steps 1-5: Run heavy CPU-bound parsing in thread pool
+        prep = await asyncio.to_thread(self._heavy_parse_and_analyze, xml_content)
+        if prep["error"]:
+            return prep["parsed"]
 
-        # Step 2: Build connector graph
-        connector_graph = self._build_connector_graph(parsed)
+        parsed = prep["parsed"]
+        connector_graph = prep["connector_graph"]
+        parameters = prep["parameters"]
+        analysis = prep["analysis"]
+        mapping_groups = prep["mapping_groups"]
 
-        # Step 3: Extract parameters
-        parameters = self._extract_parameters(parsed)
-
-        # Step 4: Analyze transformations
-        analysis = self._analyze_transformations(parsed)
-
-        # Step 5: Group transformations by mapping using connector graph
-        mapping_groups = self._group_by_mapping(parsed, connector_graph)
-
-        # Step 6: Process each mapping (LLM or rule-based per mapping)
-        # Use concurrent processing with LLM limited to top-N complex mappings
-        MAX_LLM_MAPPINGS = 3       # Only send top-3 most complex mappings to LLM
-        LLM_CONCURRENCY = 3        # Max 3 concurrent LLM calls
-        llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
-
-        # Rank mappings by complexity (transformation count) for LLM priority
-        ranked_mappings = sorted(
-            mapping_groups.items(),
-            key=lambda x: len(x[1]["transformations"]),
-            reverse=True,
-        )
-        llm_eligible = {name for name, _ in ranked_mappings[:MAX_LLM_MAPPINGS]}
-
-        async def _process_with_limit(mapping_name, group, use_llm):
-            if use_llm:
-                async with llm_semaphore:
-                    return await self._process_mapping(
-                        mapping_name, group, parsed, connector_graph, parameters
+        # Step 6: Process all mappings — pure rule-based in a thread pool (CPU-bound)
+        def _process_all_rule_based():
+            """Run ALL rule-based mapping conversions in a single thread (no async overhead)."""
+            _results = []
+            for name, group in mapping_groups.items():
+                try:
+                    r = self._process_mapping_rule_only_sync(
+                        name, group, parsed, connector_graph, parameters
                     )
-            else:
-                return await self._process_mapping_rule_only(
-                    mapping_name, group, parsed, connector_graph, parameters
-                )
+                    _results.append(r)
+                except Exception as exc:
+                    logger.warning("Mapping processing failed for %s: %s", name, exc)
+            return _results
 
-        logger.info(
-            "Processing %d mappings (%d with LLM, %d rule-based only)",
-            len(mapping_groups), min(len(mapping_groups), MAX_LLM_MAPPINGS),
-            max(0, len(mapping_groups) - MAX_LLM_MAPPINGS),
-        )
+        logger.info("Processing %d mappings (rule-based)", len(mapping_groups))
 
-        tasks = [
-            _process_with_limit(name, group, name in llm_eligible)
-            for name, group in mapping_groups.items()
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.to_thread(_process_all_rule_based)
 
         mapping_results = []
         all_sql_parts = []
         expression_comparisons = []
 
         for r in results:
-            if isinstance(r, Exception):
-                logger.warning("Mapping processing failed: %s", r)
-                continue
             mapping_results.append(r)
             if r.get("sql"):
                 all_sql_parts.append(f"-- ========== Mapping: {r['mapping_name']} ==========\n{r['sql']}")
@@ -255,6 +257,15 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         # Step 13: Recommendations
         recommendations = self._build_recommendations(analysis, parsed, scorecard)
 
+        # Step 14: Trim payload for large migrations to keep response small
+        # Cap expression_comparisons to first 500 (frontend paginates anyway)
+        total_expr_count = len(expression_comparisons)
+        trimmed_comparisons = expression_comparisons[:500]
+
+        # Strip expression_comparisons from individual mapping_results to avoid duplication
+        for mr in mapping_results:
+            mr.pop("expression_comparisons", None)
+
         return {
             # Standard fields (compatible with base response)
             "bigquery_sql": combined_sql,
@@ -273,7 +284,8 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "scorecard": scorecard,
             "mapping_results": mapping_results,
             "parameters": parameters,
-            "expression_comparisons": expression_comparisons,
+            "expression_comparisons": trimmed_comparisons,
+            "expression_comparisons_total": total_expr_count,
         }
 
     # ── XML Parsing ──────────────────────────────────────────────
@@ -583,12 +595,15 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         mapping_groups = {}
         instance_edges = connector_graph.get("instance_edges", {})
 
+        # Pre-compute SQ_ set once (not per mapping)
+        sq_names = {n for n in tf_by_name if n.startswith("SQ_") or n.startswith("sq_")}
+
         if parsed["mappings"]:
             for mp in parsed["mappings"]:
                 mp_name = mp["name"]
                 # Find all transformations reachable from sources via connector graph
                 visited = set()
-                queue = []
+                queue = deque()
 
                 # Start from source qualifier instances (instances connected from sources)
                 for src_name in source_names:
@@ -599,14 +614,13 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                                 visited.add(next_inst)
 
                 # Also add any SQ_ prefixed (Source Qualifier) transformations
-                for tf_name in tf_by_name:
-                    if tf_name.startswith("SQ_") or tf_name.startswith("sq_"):
-                        if tf_name not in visited:
-                            queue.append(tf_name)
-                            visited.add(tf_name)
+                for sq_name in sq_names:
+                    if sq_name not in visited:
+                        queue.append(sq_name)
+                        visited.add(sq_name)
 
                 while queue:
-                    current = queue.pop(0)
+                    current = queue.popleft()  # O(1) with deque vs O(n) with list.pop(0)
                     if current in instance_edges:
                         for next_inst in instance_edges[current]:
                             if next_inst not in visited:
@@ -717,11 +731,11 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "used_llm": used_llm,
         }
 
-    async def _process_mapping_rule_only(
+    def _process_mapping_rule_only_sync(
         self, mapping_name: str, group: dict, parsed: dict,
         connector_graph: dict, parameters: list,
     ) -> dict:
-        """Process a mapping using only rule-based conversion (no LLM). Fast path."""
+        """Process a mapping using only rule-based conversion (no LLM). Fast path. Sync."""
         transformations = group["transformations"]
 
         # Collect expressions for comparison
@@ -1079,19 +1093,23 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
     # ── Expression Conversion ────────────────────────────────────
 
     def _convert_expression(self, expr: str, parameters: list | None = None) -> str:
-        """Convert Informatica expression syntax to BigQuery SQL (expanded)."""
+        """Convert Informatica expression syntax to BigQuery SQL (expanded).
+
+        Uses pre-compiled regex patterns and an LRU cache for speed.
+        """
+        if expr in _expression_cache:
+            return _expression_cache[expr]
+
         converted = expr
 
-        # Apply all expression conversions
-        for pattern, replacement in EXPRESSION_CONVERSIONS.items():
-            converted = re.sub(pattern, replacement, converted, flags=re.IGNORECASE)
+        # Apply all pre-compiled expression conversions (avoids re.compile per call)
+        for compiled_re, replacement in _COMPILED_CONVERSIONS:
+            converted = compiled_re.sub(replacement, converted)
 
         # Replace $$parameters with @param_name
-        if parameters is not None:
-            converted = re.sub(r'\$\$(\w+)', r'@\1', converted)
-        else:
-            converted = re.sub(r'\$\$(\w+)', r'@\1', converted)
+        converted = _PARAM_RE.sub(r'@\1', converted)
 
+        _expression_cache[expr] = converted
         return converted
 
     # ── Airflow DAG Generation ───────────────────────────────────
@@ -1274,12 +1292,12 @@ WHERE NOT EXISTS (
 
         # Target coverage: % of targets addressed in SQL
         total_targets = len(parsed.get("targets", []))
+        # Pre-lowercase all SQL once (instead of per-target per-mapping)
+        all_sql_lower = " ".join(mr.get("sql", "").lower() for mr in mapping_results)
         target_names_in_sql = set()
-        for mr in mapping_results:
-            sql = mr.get("sql", "")
-            for tgt in parsed.get("targets", []):
-                if tgt["name"].lower() in sql.lower():
-                    target_names_in_sql.add(tgt["name"])
+        for tgt in parsed.get("targets", []):
+            if tgt["name"].lower() in all_sql_lower:
+                target_names_in_sql.add(tgt["name"])
         target_coverage = round((len(target_names_in_sql) / total_targets) * 100) if total_targets > 0 else 0
 
         # Expression fidelity: % of expressions successfully converted
