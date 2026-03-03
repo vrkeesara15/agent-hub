@@ -6,6 +6,10 @@ import { Breadcrumb } from '@/components/layout/Breadcrumb';
 import { Button } from '@/components/ui/Button';
 import { migrateInformatica, migrateInformaticaAdvanced } from '@/lib/api';
 import { InformaticaMigrationResponse, InformaticaAdvancedMigrationResponse } from '@/lib/types';
+import ExpressionCompare from './components/ExpressionCompare';
+import MappingExplorer from './components/MappingExplorer';
+import ScorecardEnhanced from './components/ScorecardEnhanced';
+import DataFlowDiagram from './components/DataFlowDiagram';
 
 const SAMPLE_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <POWERMART>
@@ -76,7 +80,7 @@ const SAMPLE_XML = `<?xml version="1.0" encoding="UTF-8"?>
   </REPOSITORY>
 </POWERMART>`;
 
-type ActiveTab = 'report' | 'sql' | 'dag' | 'map' | 'scd' | 'scorecard' | 'mappings' | 'params' | 'expressions';
+type ActiveTab = 'report' | 'sql' | 'dag' | 'map' | 'scd' | 'scorecard' | 'mappings' | 'params' | 'expressions' | 'dataflow';
 type InputMode = 'upload' | 'paste';
 type MigrationMode = 'standard' | 'advanced';
 
@@ -299,12 +303,6 @@ export default function InformaticaMigrationPage() {
     if (score >= 80) return 'bg-green-100 dark:bg-green-900/30 border-green-200 dark:border-green-800';
     if (score >= 50) return 'bg-amber-100 dark:bg-amber-900/30 border-amber-200 dark:border-amber-800';
     return 'bg-red-100 dark:bg-red-900/30 border-red-200 dark:border-red-800';
-  };
-
-  const statusColor = (status: string) => {
-    if (status === 'converted') return 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300';
-    if (status === 'partial') return 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300';
-    return 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300';
   };
 
   const getReportData = (r: InformaticaMigrationResponse) => {
@@ -565,6 +563,7 @@ export default function InformaticaMigrationPage() {
                 { key: 'mappings' as ActiveTab, label: 'Mapping Results', icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg> },
                 { key: 'params' as ActiveTab, label: 'Parameters', icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/></svg> },
                 { key: 'expressions' as ActiveTab, label: 'Expression Compare', icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="m15 9 6-6"/></svg> },
+                { key: 'dataflow' as ActiveTab, label: 'Data Flow', icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg> },
               ] : []),
               { key: 'report' as ActiveTab, label: 'Migration Report', icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 17H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M15 3h4a2 2 0 012 2v10a2 2 0 01-2 2h-4"/></svg> },
               { key: 'sql' as ActiveTab, label: 'BigQuery SQL', icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg> },
@@ -575,7 +574,7 @@ export default function InformaticaMigrationPage() {
               <button key={tab.key} onClick={() => setActiveTab(tab.key)}
                 className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
                   activeTab === tab.key
-                    ? advancedResult && ['scorecard', 'mappings', 'params', 'expressions'].includes(tab.key) ? 'border-purple-600 text-purple-600' : 'border-brand-blue text-brand-blue'
+                    ? advancedResult && ['scorecard', 'mappings', 'params', 'expressions', 'dataflow'].includes(tab.key) ? 'border-purple-600 text-purple-600' : 'border-brand-blue text-brand-blue'
                     : 'border-transparent text-text-secondary hover:text-text-primary'
                 }`}>
                 {tab.icon}{tab.label}
@@ -584,77 +583,20 @@ export default function InformaticaMigrationPage() {
           </div>
 
           {/* ══════ Tab: Scorecard ══════ */}
-          {activeTab === 'scorecard' && advancedResult?.scorecard && (() => {
-            const sc = advancedResult.scorecard;
-            const dims = [
-              { label: 'SQL Coverage', value: sc.sql_coverage, desc: 'Mappings with generated SQL' },
-              { label: 'Target Coverage', value: sc.target_coverage, desc: 'Target tables addressed' },
-              { label: 'Expression Fidelity', value: sc.expression_fidelity, desc: 'Expressions converted' },
-              { label: 'DAG Completeness', value: sc.dag_completeness, desc: 'Mappings with DAG tasks' },
-              { label: 'Param Resolution', value: sc.parameter_resolution, desc: '$$params resolved' },
-              { label: 'SCD Coverage', value: sc.scd_coverage, desc: 'SCD patterns handled' },
-            ];
-            return (
-              <div className="space-y-6">
-                <div className={`p-6 rounded-card border-2 ${scoreBgColor(sc.overall_score)} text-center`}>
-                  <div className={`text-5xl font-black ${scoreColor(sc.overall_score)}`}>{sc.overall_score}%</div>
-                  <div className="text-sm font-medium text-text-secondary mt-2">Overall Migration Score</div>
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                  {dims.map((d) => (
-                    <div key={d.label} className="p-4 bg-surface-card border border-surface-border rounded-card">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-medium text-text-secondary">{d.label}</span>
-                        <span className={`text-lg font-bold ${scoreColor(d.value)}`}>{d.value}%</span>
-                      </div>
-                      <div className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full transition-all duration-700 ${d.value >= 80 ? 'bg-green-500' : d.value >= 50 ? 'bg-amber-500' : 'bg-red-500'}`} style={{ width: `${d.value}%` }} />
-                      </div>
-                      <p className="text-[10px] text-text-muted mt-1.5">{d.desc}</p>
-                    </div>
-                  ))}
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="p-3 bg-surface-card border border-surface-border rounded-card text-center"><div className="text-lg font-bold text-purple-600">{advancedResult.mapping_results?.length || 0}</div><div className="text-[10px] text-text-muted">Mappings Processed</div></div>
-                  <div className="p-3 bg-surface-card border border-surface-border rounded-card text-center"><div className="text-lg font-bold text-green-600">{advancedResult.mapping_results?.filter(m => m.status === 'converted').length || 0}</div><div className="text-[10px] text-text-muted">Fully Converted</div></div>
-                  <div className="p-3 bg-surface-card border border-surface-border rounded-card text-center"><div className="text-lg font-bold text-blue-600">{advancedResult.parameters?.length || 0}</div><div className="text-[10px] text-text-muted">Parameters Found</div></div>
-                  <div className="p-3 bg-surface-card border border-surface-border rounded-card text-center"><div className="text-lg font-bold text-indigo-600">{advancedResult.expression_comparisons?.length || 0}</div><div className="text-[10px] text-text-muted">Expressions Analyzed</div></div>
-                </div>
-              </div>
-            );
-          })()}
+          {activeTab === 'scorecard' && advancedResult?.scorecard && (
+            <ScorecardEnhanced
+              scorecard={advancedResult.scorecard}
+              mappingResults={advancedResult.mapping_results || []}
+              transformationMap={result.transformation_map || []}
+              sources={result.sources || []}
+              targets={result.targets || []}
+              expressionComparisons={advancedResult.expression_comparisons || []}
+            />
+          )}
 
           {/* ══════ Tab: Mapping Results ══════ */}
           {activeTab === 'mappings' && advancedResult?.mapping_results && (
-            <div className="bg-surface-card border border-surface-border rounded-card overflow-hidden">
-              <div className="px-4 py-3 border-b border-surface-border bg-surface-bg/50">
-                <span className="text-xs font-medium text-text-secondary uppercase tracking-wide">Per-Mapping Results</span>
-              </div>
-              <div className="p-4 overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead><tr className="border-b border-surface-border">
-                    <th className="text-left py-2.5 px-3 text-text-secondary font-medium">Mapping</th>
-                    <th className="text-left py-2.5 px-3 text-text-secondary font-medium">Status</th>
-                    <th className="text-center py-2.5 px-3 text-text-secondary font-medium">Transforms</th>
-                    <th className="text-center py-2.5 px-3 text-text-secondary font-medium">Expressions</th>
-                    <th className="text-center py-2.5 px-3 text-text-secondary font-medium">Engine</th>
-                    <th className="text-left py-2.5 px-3 text-text-secondary font-medium">Issues</th>
-                  </tr></thead>
-                  <tbody>
-                    {advancedResult.mapping_results.map((mr, i) => (
-                      <tr key={i} className="border-b border-surface-border/50 last:border-0 hover:bg-surface-bg/30 transition-colors">
-                        <td className="py-2.5 px-3 font-mono text-text-primary text-xs">{mr.mapping_name}</td>
-                        <td className="py-2.5 px-3"><span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-medium ${statusColor(mr.status)}`}>{mr.status}</span></td>
-                        <td className="py-2.5 px-3 text-center text-xs"><span className="text-green-600 font-medium">{mr.transformations_converted}</span><span className="text-text-muted">/{mr.transformations_used}</span></td>
-                        <td className="py-2.5 px-3 text-center text-xs"><span className="text-blue-600 font-medium">{mr.expressions_converted}</span><span className="text-text-muted">/{mr.expressions_total}</span></td>
-                        <td className="py-2.5 px-3 text-center">{mr.used_llm ? <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300">LLM</span> : <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">Rules</span>}</td>
-                        <td className="py-2.5 px-3 text-xs text-text-secondary">{mr.issues.length > 0 ? <span className="text-amber-600">{mr.issues.length} issue(s)</span> : <span className="text-green-600">None</span>}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <MappingExplorer data={advancedResult.mapping_results} />
           )}
 
           {/* ══════ Tab: Parameters ══════ */}
@@ -692,34 +634,18 @@ export default function InformaticaMigrationPage() {
 
           {/* ══════ Tab: Expression Compare ══════ */}
           {activeTab === 'expressions' && advancedResult && (
-            <div className="bg-surface-card border border-surface-border rounded-card overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border bg-surface-bg/50">
-                <span className="text-xs font-medium text-text-secondary uppercase tracking-wide">Expression Conversion Comparison</span>
-                <div className="flex items-center gap-3 text-xs">
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500" /> Converted</span>
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500" /> Partial</span>
-                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> Failed</span>
-                </div>
-              </div>
-              {(!advancedResult.expression_comparisons || advancedResult.expression_comparisons.length === 0) ? (
-                <div className="p-8 text-center text-sm text-text-muted">No expressions found to compare.</div>
-              ) : (
-                <div className="p-4 space-y-3 max-h-[600px] overflow-y-auto">
-                  {advancedResult.expression_comparisons.map((ec, i) => (
-                    <div key={i} className={`p-3 rounded-lg border ${ec.status === 'converted' ? 'border-green-200 dark:border-green-800 bg-green-50/30 dark:bg-green-950/10' : ec.status === 'partial' ? 'border-amber-200 dark:border-amber-800 bg-amber-50/30 dark:bg-amber-950/10' : 'border-red-200 dark:border-red-800 bg-red-50/30 dark:bg-red-950/10'}`}>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-mono text-text-muted">{ec.mapping}</span>
-                        <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${statusColor(ec.status)}`}>{ec.status}</span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div><div className="text-[10px] text-text-muted mb-1 uppercase tracking-wide">Informatica</div><code className="text-xs font-mono text-red-700 dark:text-red-300 break-all">{ec.original}</code></div>
-                        <div><div className="text-[10px] text-text-muted mb-1 uppercase tracking-wide">BigQuery</div><code className="text-xs font-mono text-green-700 dark:text-green-300 break-all">{ec.converted}</code></div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            advancedResult.expression_comparisons && advancedResult.expression_comparisons.length > 0
+              ? <ExpressionCompare data={advancedResult.expression_comparisons} />
+              : <div className="bg-surface-card border border-surface-border rounded-card p-8 text-center text-sm text-text-muted">No expressions found to compare.</div>
+          )}
+
+          {/* ══════ Tab: Data Flow ══════ */}
+          {activeTab === 'dataflow' && advancedResult && (
+            <DataFlowDiagram
+              sources={result.sources || []}
+              targets={result.targets || []}
+              mappingResults={advancedResult.mapping_results || []}
+            />
           )}
 
           {/* ══════ Tab: Migration Report ══════ */}
