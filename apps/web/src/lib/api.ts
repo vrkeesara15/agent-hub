@@ -99,6 +99,15 @@ export async function migrateInformatica(xmlContent: string, filename: string) {
   });
 }
 
+// --- Informatica Migration Advanced ---
+
+export async function migrateInformaticaAdvanced(xmlContent: string, filename: string) {
+  return fetchAPI<import('./types').InformaticaAdvancedMigrationResponse>('/api/agents/informatica-migration/migrate-advanced', {
+    method: 'POST',
+    body: JSON.stringify({ xml_content: xmlContent, filename }),
+  });
+}
+
 // --- NL to DAG ---
 
 export async function generateDAG(description: string) {

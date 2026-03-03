@@ -156,6 +156,51 @@ export interface InformaticaMigrationResponse {
   error?: string;
 }
 
+// --- Informatica Migration Advanced ---
+
+export interface MigrationScorecard {
+  overall_score: number;
+  sql_coverage: number;
+  target_coverage: number;
+  expression_fidelity: number;
+  dag_completeness: number;
+  parameter_resolution: number;
+  scd_coverage: number;
+}
+
+export interface MappingResult {
+  mapping_name: string;
+  status: 'converted' | 'partial' | 'failed';
+  sql: string;
+  transformations_used: number;
+  transformations_converted: number;
+  expressions_converted: number;
+  expressions_total: number;
+  issues: string[];
+  used_llm: boolean;
+}
+
+export interface ExtractedParameter {
+  name: string;
+  default_value: string;
+  used_in_mappings: string[];
+  type_guess: string;
+}
+
+export interface ExpressionComparison {
+  original: string;
+  converted: string;
+  status: 'converted' | 'partial' | 'failed';
+  mapping: string;
+}
+
+export interface InformaticaAdvancedMigrationResponse extends InformaticaMigrationResponse {
+  scorecard: MigrationScorecard;
+  mapping_results: MappingResult[];
+  parameters: ExtractedParameter[];
+  expression_comparisons: ExpressionComparison[];
+}
+
 // --- NL to DAG ---
 
 export interface NLToDAGResponse {
