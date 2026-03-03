@@ -344,7 +344,7 @@ class InformaticaMigrationAgent(BaseAgent):
 
             api_response = await asyncio.wait_for(
                 asyncio.to_thread(_sync_call),
-                timeout=120,
+                timeout=45,
             )
             text = api_response.content[0].text.strip()
             if text.startswith("```"):

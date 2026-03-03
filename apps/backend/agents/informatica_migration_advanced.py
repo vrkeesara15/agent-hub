@@ -170,7 +170,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
         # Step 6: Process each mapping (LLM or rule-based per mapping)
         # Use concurrent processing with LLM limited to top-N complex mappings
-        MAX_LLM_MAPPINGS = 5       # Only send top-5 most complex mappings to LLM
+        MAX_LLM_MAPPINGS = 3       # Only send top-3 most complex mappings to LLM
         LLM_CONCURRENCY = 3        # Max 3 concurrent LLM calls
         llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
 
@@ -809,7 +809,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             # Run sync Anthropic SDK call in thread pool to avoid blocking event loop
             text = await asyncio.wait_for(
                 asyncio.to_thread(self._sync_llm_call, self.system_prompt, prompt),
-                timeout=120,  # 2 min per mapping
+                timeout=45,  # 45s per mapping — must fit within Railway's 120s total
             )
             if text.startswith("```"):
                 lines = text.split("\n")

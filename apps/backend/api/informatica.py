@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -10,15 +12,27 @@ from agents.informatica_migration_advanced import InformaticaMigrationAdvancedAg
 from models.schemas import InformaticaMigrateRequest
 
 router = APIRouter(tags=["informatica-migration"])
+logger = logging.getLogger(__name__)
+
+# Railway enforces a ~120s request timeout. We set our own timeout slightly
+# below that so we can return a graceful error instead of a connection reset.
+REQUEST_TIMEOUT = 100  # seconds
 
 
 @router.post("/api/agents/informatica-migration/migrate")
 async def informatica_migrate(request: InformaticaMigrateRequest):
     agent = InformaticaMigrationAgent()
-    result = await agent.migrate(
-        xml_content=request.xml_content,
-        filename=request.filename,
-    )
+    try:
+        result = await asyncio.wait_for(
+            agent.migrate(
+                xml_content=request.xml_content,
+                filename=request.filename,
+            ),
+            timeout=REQUEST_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Standard migration timed out for %s", request.filename)
+        return {"error": "Migration timed out. The workflow may be too large. Try Advanced mode for complex workflows."}
 
     # Record activity
     from main import activity_log
@@ -39,10 +53,17 @@ async def informatica_migrate(request: InformaticaMigrateRequest):
 @router.post("/api/agents/informatica-migration/migrate-advanced")
 async def informatica_migrate_advanced(request: InformaticaMigrateRequest):
     agent = InformaticaMigrationAdvancedAgent()
-    result = await agent.migrate(
-        xml_content=request.xml_content,
-        filename=request.filename,
-    )
+    try:
+        result = await asyncio.wait_for(
+            agent.migrate(
+                xml_content=request.xml_content,
+                filename=request.filename,
+            ),
+            timeout=REQUEST_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Advanced migration timed out for %s", request.filename)
+        return {"error": "Migration timed out. The workflow is very large — try splitting it into smaller XML files."}
 
     # Record activity
     from main import activity_log
