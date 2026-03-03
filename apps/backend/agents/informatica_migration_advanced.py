@@ -169,18 +169,54 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         mapping_groups = self._group_by_mapping(parsed, connector_graph)
 
         # Step 6: Process each mapping (LLM or rule-based per mapping)
+        # Use concurrent processing with LLM limited to top-N complex mappings
+        MAX_LLM_MAPPINGS = 5       # Only send top-5 most complex mappings to LLM
+        LLM_CONCURRENCY = 3        # Max 3 concurrent LLM calls
+        llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
+
+        # Rank mappings by complexity (transformation count) for LLM priority
+        ranked_mappings = sorted(
+            mapping_groups.items(),
+            key=lambda x: len(x[1]["transformations"]),
+            reverse=True,
+        )
+        llm_eligible = {name for name, _ in ranked_mappings[:MAX_LLM_MAPPINGS]}
+
+        async def _process_with_limit(mapping_name, group, use_llm):
+            if use_llm:
+                async with llm_semaphore:
+                    return await self._process_mapping(
+                        mapping_name, group, parsed, connector_graph, parameters
+                    )
+            else:
+                return await self._process_mapping_rule_only(
+                    mapping_name, group, parsed, connector_graph, parameters
+                )
+
+        logger.info(
+            "Processing %d mappings (%d with LLM, %d rule-based only)",
+            len(mapping_groups), min(len(mapping_groups), MAX_LLM_MAPPINGS),
+            max(0, len(mapping_groups) - MAX_LLM_MAPPINGS),
+        )
+
+        tasks = [
+            _process_with_limit(name, group, name in llm_eligible)
+            for name, group in mapping_groups.items()
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
         mapping_results = []
         all_sql_parts = []
         expression_comparisons = []
 
-        for mapping_name, group in mapping_groups.items():
-            mr = await self._process_mapping(
-                mapping_name, group, parsed, connector_graph, parameters
-            )
-            mapping_results.append(mr)
-            if mr.get("sql"):
-                all_sql_parts.append(f"-- ========== Mapping: {mapping_name} ==========\n{mr['sql']}")
-            expression_comparisons.extend(mr.get("expression_comparisons", []))
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("Mapping processing failed: %s", r)
+                continue
+            mapping_results.append(r)
+            if r.get("sql"):
+                all_sql_parts.append(f"-- ========== Mapping: {r['mapping_name']} ==========\n{r['sql']}")
+            expression_comparisons.extend(r.get("expression_comparisons", []))
 
         # Step 7: Combine results
         combined_sql = "\n\n".join(all_sql_parts) if all_sql_parts else "-- No SQL generated"
@@ -679,6 +715,65 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "issues": issues,
             "expression_comparisons": expression_comparisons,
             "used_llm": used_llm,
+        }
+
+    async def _process_mapping_rule_only(
+        self, mapping_name: str, group: dict, parsed: dict,
+        connector_graph: dict, parameters: list,
+    ) -> dict:
+        """Process a mapping using only rule-based conversion (no LLM). Fast path."""
+        transformations = group["transformations"]
+
+        # Collect expressions for comparison
+        expression_comparisons = []
+        total_expressions = 0
+        converted_expressions = 0
+        for tf in transformations:
+            for field in tf.get("fields", []):
+                original_expr = field.get("expression", "")
+                if not original_expr:
+                    continue
+                total_expressions += 1
+                converted_expr = self._convert_expression(original_expr, parameters)
+                if converted_expr != original_expr:
+                    converted_expressions += 1
+                    status = "converted"
+                else:
+                    status = "failed"
+                expression_comparisons.append({
+                    "original": original_expr,
+                    "converted": converted_expr,
+                    "status": status,
+                    "mapping": mapping_name,
+                })
+
+        sql = self._rule_based_mapping_sql(
+            mapping_name, group, connector_graph, parameters
+        )
+
+        tf_converted = sum(
+            1 for tf in transformations
+            if TRANSFORMATION_MAP.get(tf["type"], {}).get("type") == "sql"
+        )
+
+        issues = []
+        for tf in transformations:
+            tf_type = tf["type"]
+            if tf_type in UNSUPPORTED_PATTERNS or TRANSFORMATION_MAP.get(tf_type, {}).get("type") == "dataflow":
+                issues.append(f"Cannot auto-convert {tf['name']} ({tf_type}) - requires manual review")
+
+        return {
+            "mapping_name": mapping_name,
+            "status": "converted" if tf_converted == len(transformations) else
+                      "partial" if tf_converted > 0 else "failed",
+            "sql": sql,
+            "transformations_used": len(transformations),
+            "transformations_converted": tf_converted,
+            "expressions_converted": converted_expressions,
+            "expressions_total": total_expressions,
+            "issues": issues,
+            "expression_comparisons": expression_comparisons,
+            "used_llm": False,
         }
 
     def _sync_llm_call(self, system: str, prompt: str) -> str:
