@@ -104,7 +104,7 @@ export async function migrateInformatica(xmlContent: string, filename: string) {
 export async function migrateInformaticaAdvanced(xmlContent: string, filename: string) {
   // Advanced migration makes per-mapping LLM calls and needs a longer timeout
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 min
+  const timeoutId = setTimeout(() => controller.abort(), 45 * 60 * 1000); // 45 min — LLM processes all mappings
   try {
     return await fetchAPI<import('./types').InformaticaAdvancedMigrationResponse>(
       '/api/agents/informatica-migration/migrate-advanced',
