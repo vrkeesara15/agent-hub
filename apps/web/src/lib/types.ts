@@ -199,6 +199,7 @@ export interface InformaticaAdvancedMigrationResponse extends InformaticaMigrati
   mapping_results: MappingResult[];
   parameters: ExtractedParameter[];
   expression_comparisons: ExpressionComparison[];
+  mapping_sql_files?: Record<string, string>;
 }
 
 // --- NL to DAG ---

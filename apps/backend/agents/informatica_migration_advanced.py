@@ -192,29 +192,54 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         analysis = prep["analysis"]
         mapping_groups = prep["mapping_groups"]
 
-        # Step 6: Process all mappings — pure rule-based in a thread pool (CPU-bound)
-        def _process_all_rule_based():
-            """Run ALL rule-based mapping conversions in a single thread (no async overhead)."""
-            _results = []
-            for name, group in mapping_groups.items():
-                try:
-                    r = self._process_mapping_rule_only_sync(
-                        name, group, parsed, connector_graph, parameters
+        # Step 6: Process mappings — LLM-assisted when available, else rule-based
+        LLM_CONCURRENCY = 3
+
+        if self.llm.client is not None:
+            # ── LLM path: send all mappings through LLM with concurrency limit ──
+            llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
+
+            async def _process_with_llm(mapping_name, group):
+                async with llm_semaphore:
+                    return await self._process_mapping(
+                        mapping_name, group, parsed, connector_graph, parameters
                     )
-                    _results.append(r)
-                except Exception as exc:
-                    logger.warning("Mapping processing failed for %s: %s", name, exc)
-            return _results
 
-        logger.info("Processing %d mappings (rule-based)", len(mapping_groups))
+            logger.info(
+                "Processing %d mappings with LLM (concurrency=%d)",
+                len(mapping_groups), LLM_CONCURRENCY,
+            )
 
-        results = await asyncio.to_thread(_process_all_rule_based)
+            tasks = [
+                _process_with_llm(name, group)
+                for name, group in mapping_groups.items()
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            # ── No LLM: fast rule-based path in thread pool ──
+            def _process_all_rule_based():
+                _results = []
+                for name, group in mapping_groups.items():
+                    try:
+                        r = self._process_mapping_rule_only_sync(
+                            name, group, parsed, connector_graph, parameters
+                        )
+                        _results.append(r)
+                    except Exception as exc:
+                        logger.warning("Mapping processing failed for %s: %s", name, exc)
+                return _results
+
+            logger.info("Processing %d mappings (rule-based, no LLM)", len(mapping_groups))
+            results = await asyncio.to_thread(_process_all_rule_based)
 
         mapping_results = []
         all_sql_parts = []
         expression_comparisons = []
 
         for r in results:
+            if isinstance(r, Exception):
+                logger.warning("Mapping processing failed: %s", r)
+                continue
             mapping_results.append(r)
             if r.get("sql"):
                 all_sql_parts.append(f"-- ========== Mapping: {r['mapping_name']} ==========\n{r['sql']}")
@@ -266,6 +291,13 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         for mr in mapping_results:
             mr.pop("expression_comparisons", None)
 
+        # Step 15: Build per-mapping SQL files dict for the sql/ folder
+        mapping_sql_files = {}
+        for mr in mapping_results:
+            if mr.get("sql"):
+                sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', mr["mapping_name"].lower())
+                mapping_sql_files[f"{sanitized}.sql"] = mr["sql"]
+
         return {
             # Standard fields (compatible with base response)
             "bigquery_sql": combined_sql,
@@ -286,6 +318,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "parameters": parameters,
             "expression_comparisons": trimmed_comparisons,
             "expression_comparisons_total": total_expr_count,
+            "mapping_sql_files": mapping_sql_files,
         }
 
     # ── XML Parsing ──────────────────────────────────────────────
@@ -1115,7 +1148,11 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
     # ── Airflow DAG Generation ───────────────────────────────────
 
     def _generate_airflow_dag(self, parsed: dict, analysis: dict, mapping_results: list) -> str:
-        """Generate Airflow DAG with per-mapping tasks."""
+        """Generate Airflow DAG with per-mapping tasks that read SQL from files.
+
+        Each mapping's SQL is stored in a separate .sql file under a sql/ directory
+        alongside the DAG. The DAG reads each file at runtime using pathlib.
+        """
         wf_name = parsed["workflows"][0]["name"] if parsed["workflows"] else "informatica_migration"
         dag_id = re.sub(r'[^a-zA-Z0-9_]', '_', wf_name.lower())
 
@@ -1140,16 +1177,38 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             f"Sources: {', '.join(sources[:10])}{'...' if len(sources) > 10 else ''}",
             f"Targets: {', '.join(targets[:10])}{'...' if len(targets) > 10 else ''}",
             f"Mappings: {len(mapping_results)}",
+            "",
+            "SQL files are stored in the sql/ directory alongside this DAG.",
+            "Deploy both this DAG and the sql/ folder to your Composer dags/ bucket:",
+            "  gsutil -m cp -r sql/ gs://<composer-bucket>/dags/sql/",
+            "  gsutil cp this_dag.py gs://<composer-bucket>/dags/",
             '"""',
             "",
             "from datetime import datetime, timedelta",
+            "from pathlib import Path",
+            "",
             "from airflow import DAG",
             "from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator",
             "from airflow.operators.dummy import DummyOperator",
             "",
-            "# Configuration",
+            "# ── Configuration ─────────────────────────────────────────────",
+            "# Set these Airflow Variables in the Composer UI:",
+            "#   gcp_project_id  — your GCP project ID",
+            "#   bq_dataset      — target BigQuery dataset name",
             'PROJECT_ID = "{{ var.value.gcp_project_id }}"',
             'DATASET = "{{ var.value.bq_dataset }}"',
+            "",
+            "# SQL files directory (alongside this DAG file)",
+            'SQL_DIR = Path(__file__).parent / "sql"',
+            "",
+            "",
+            "def _read_sql(filename: str) -> str:",
+            '    """Read a SQL file from the sql/ directory."""',
+            "    sql_path = SQL_DIR / filename",
+            "    if sql_path.exists():",
+            "        return sql_path.read_text(encoding='utf-8')",
+            '    return f"-- ERROR: SQL file not found: {filename}"',
+            "",
             "",
             "default_args = {",
             '    "owner": "data-engineering",',
@@ -1175,25 +1234,22 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "",
         ]
 
-        # Create a task per mapping
+        # Create a task per mapping — each reads its SQL from a .sql file
         task_names = []
         for mr in mapping_results:
             task_id = re.sub(r'[^a-zA-Z0-9_]', '_', mr["mapping_name"].lower())
             task_names.append(task_id)
-
-            sql_snippet = mr.get("sql", "SELECT 1")[:200].replace('"', '\\"').replace("\n", "\\n")
+            sql_filename = f"{task_id}.sql"
 
             lines.append(f'    # Mapping: {mr["mapping_name"]} ({mr["status"]})')
+            lines.append(f'    # Transformations converted: {mr["transformations_converted"]}/{mr["transformations_used"]}')
+            if mr.get("used_llm"):
+                lines.append(f'    # Engine: LLM-assisted')
             lines.append(f'    {task_id} = BigQueryInsertJobOperator(')
             lines.append(f'        task_id="{task_id}",')
             lines.append("        configuration={")
             lines.append('            "query": {')
-            lines.append(f'                "query": """')
-            lines.append(f'                    -- Mapping: {mr["mapping_name"]}')
-            lines.append(f'                    -- Status: {mr["status"]}')
-            lines.append(f'                    -- Transformations: {mr["transformations_converted"]}/{mr["transformations_used"]}')
-            lines.append(f'                    SELECT * FROM `{{{{ var.value.gcp_project_id }}}}.{{{{ var.value.bq_dataset }}}}.staging`')
-            lines.append('                """,')
+            lines.append(f'                "query": _read_sql("{sql_filename}"),')
             lines.append('                "useLegacySql": False,')
             lines.append("            }")
             lines.append("        },")

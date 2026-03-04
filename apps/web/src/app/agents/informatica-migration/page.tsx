@@ -264,6 +264,15 @@ export default function InformaticaMigrationPage() {
     if (result.scd_merge) {
       zip.file(`${base}_scd_merge.sql`, result.scd_merge);
     }
+    // Add per-mapping SQL files in a sql/ subfolder (referenced by the DAG)
+    if (advancedResult?.mapping_sql_files) {
+      const sqlFolder = zip.folder('sql');
+      if (sqlFolder) {
+        Object.entries(advancedResult.mapping_sql_files).forEach(([filename, sql]) => {
+          sqlFolder.file(filename, sql);
+        });
+      }
+    }
     const blob = await zip.generateAsync({ type: 'blob' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

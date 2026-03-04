@@ -52,18 +52,16 @@ async def informatica_migrate(request: InformaticaMigrateRequest):
 
 @router.post("/api/agents/informatica-migration/migrate-advanced")
 async def informatica_migrate_advanced(request: InformaticaMigrateRequest):
+    """Advanced migration — no timeout wrapper.
+
+    This endpoint processes all mappings with LLM when available.
+    Designed for local runs where Railway's 120s limit does not apply.
+    """
     agent = InformaticaMigrationAdvancedAgent()
-    try:
-        result = await asyncio.wait_for(
-            agent.migrate(
-                xml_content=request.xml_content,
-                filename=request.filename,
-            ),
-            timeout=REQUEST_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("Advanced migration timed out for %s", request.filename)
-        return {"error": "Migration timed out. The workflow is very large — try splitting it into smaller XML files."}
+    result = await agent.migrate(
+        xml_content=request.xml_content,
+        filename=request.filename,
+    )
 
     # Record activity
     from main import activity_log
