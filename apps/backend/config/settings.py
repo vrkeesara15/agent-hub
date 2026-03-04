@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import os
+
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+# Load .env FIRST with override=True so .env values always win
+# over stale/empty shell exports.
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"), override=True)
 
 
 class Settings(BaseSettings):
