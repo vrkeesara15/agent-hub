@@ -61,6 +61,11 @@ async def informatica_migrate_advanced(request: InformaticaMigrateRequest):
     result = await agent.migrate(
         xml_content=request.xml_content,
         filename=request.filename,
+        parameter_overrides=request.parameter_overrides,
+        parameter_file_content=request.parameter_file_content,
+        table_naming_config=request.table_naming_config,
+        enable_reconciliation=request.enable_reconciliation,
+        reconciliation_threshold_pct=request.reconciliation_threshold_pct,
     )
 
     # Record activity
