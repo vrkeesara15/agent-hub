@@ -127,13 +127,16 @@ class OptimizeResponse(BaseModel):
 # --- Informatica Migration ---
 
 class InformaticaMigrateRequest(BaseModel):
-    xml_content: str
+    xml_content: str  # str or list[str] for multi-XML
     filename: str = "workflow.xml"
     parameter_overrides: Optional[dict[str, str]] = None
     parameter_file_content: Optional[str] = None
     table_naming_config: Optional[dict] = None
     enable_reconciliation: bool = True
     reconciliation_threshold_pct: float = 5.0
+    selected_mappings: Optional[list[str]] = None
+    connection_config: Optional[dict] = None
+    use_cache: bool = True
 
 
 # --- NL to DAG ---

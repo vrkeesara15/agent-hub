@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -82,7 +83,6 @@ UNSUPPORTED_PATTERNS = [
     "Address Validator",
     "HTTP Transformation",
     "Web Service Consumer",
-    "Unconnected Lookup",
 ]
 
 # Expanded expression conversion map (30+ patterns)
@@ -212,6 +212,34 @@ class TableNamingConfig:
         return "CREATE TEMP TABLE" if self.use_temp_tables else "CREATE OR REPLACE TABLE"
 
 
+@dataclass
+class ConnectionConfig:
+    """Maps Informatica connection names to BigQuery project/dataset targets."""
+
+    connections: dict  # {conn_name: {"project": str, "dataset": str, "type": str}}
+
+    def resolve(self, connection_name: str) -> tuple[str, str]:
+        """Return (project, dataset) for an Informatica connection name."""
+        conn = self.connections.get(connection_name, {})
+        if not conn:
+            # Try case-insensitive and partial match
+            for key, val in self.connections.items():
+                if key.lower() in connection_name.lower() or connection_name.lower() in key.lower():
+                    return val.get("project", "project"), val.get("dataset", "dataset")
+        return conn.get("project", "project"), conn.get("dataset", "dataset")
+
+
+# Flat file source type detection
+FLAT_FILE_TYPES = {"FLATFILE", "FLAT FILE", "FILE", "XML SOURCE", "COBOL"}
+
+# Partition / Cluster column heuristics
+_PARTITION_RE = re.compile(
+    r'(^|_)(date|dt|timestamp|created|updated|load_date|etl_date|batch_date|effective_date|process_date)($|_)', re.I,
+)
+_CLUSTER_RE = re.compile(
+    r'(^|_)(id|key|code|type|status|category|region|country|account)($|_)', re.I,
+)
+
 # Pre-compile all regex patterns ONCE at module load (avoids re-compiling 480K+ times)
 _COMPILED_CONVERSIONS = [
     (re.compile(pattern, re.IGNORECASE), replacement)
@@ -222,15 +250,34 @@ _PARAM_RE = re.compile(r'\$\$(\w+)')
 # Expression conversion cache — many expressions repeat across mappings
 _expression_cache: dict[str, str] = {}
 
+# Intermediate result cache: XML content hash -> parsed prep results (Item 39)
+_prep_cache: dict[str, dict] = {}
+
 
 class InformaticaMigrationAdvancedAgent(BaseAgent):
     name = "Informatica Migration Advanced"
     slug = "informatica-migration-advanced"
     system_prompt = ADVANCED_SYSTEM_PROMPT
 
-    def _heavy_parse_and_analyze(self, xml_content: str) -> dict:
+    def _heavy_parse_and_analyze(
+        self, xml_content: str, use_cache: bool = True,
+    ) -> dict:
         """CPU-bound: parse XML, build graph, analyze. Runs in thread pool."""
-        parsed = self._parse_xml(xml_content)
+        # Item 39: Content-hash caching
+        if use_cache:
+            content_hash = hashlib.sha256(xml_content.encode()).hexdigest()[:16]
+            if content_hash in _prep_cache:
+                logger.info("Cache hit for XML hash %s", content_hash)
+                return _prep_cache[content_hash]
+        else:
+            content_hash = None
+
+        # Use streaming parser for large XMLs (Item 38)
+        if len(xml_content) > self._ITERPARSE_THRESHOLD:
+            logger.info("Using iterparse for %d-byte XML", len(xml_content))
+            parsed = self._parse_xml_iterparse(xml_content)
+        else:
+            parsed = self._parse_xml(xml_content)
         if parsed.get("error"):
             return {"parsed": parsed, "error": True}
 
@@ -239,7 +286,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         analysis = self._analyze_transformations(parsed)
         mapping_groups = self._group_by_mapping(parsed, connector_graph)
 
-        return {
+        result = {
             "parsed": parsed,
             "connector_graph": connector_graph,
             "parameters": parameters,
@@ -248,18 +295,86 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "error": False,
         }
 
+        # Store in cache
+        if content_hash:
+            _prep_cache[content_hash] = result
+            # Limit cache size
+            if len(_prep_cache) > 10:
+                oldest = next(iter(_prep_cache))
+                del _prep_cache[oldest]
+
+        return result
+
+    def _heavy_parse_and_analyze_multi(self, xml_list: list[str]) -> dict:
+        """Parse multiple XMLs and merge their parsed structures (Item 1)."""
+        merged: dict[str, list] = {
+            "sources": [], "targets": [], "transformations": [],
+            "mappings": [], "workflows": [], "sessions": [], "connectors": [],
+            "mapplets": [], "worklets": [], "workflow_links": [],
+            "task_instances": [], "command_tasks": [],
+            "event_wait_tasks": [], "decision_tasks": [],
+        }
+        for xml_str in xml_list:
+            parsed = self._parse_xml(xml_str)
+            if parsed.get("error"):
+                return {"parsed": parsed, "error": True}
+            for key in merged:
+                merged[key].extend(parsed.get(key, []))
+
+        # Deduplicate shared definitions by name
+        for key in ("mapplets", "sources", "targets"):
+            merged[key] = self._deduplicate_by_name(merged[key])
+
+        connector_graph = self._build_connector_graph(merged)
+        parameters = self._extract_parameters(merged)
+        analysis = self._analyze_transformations(merged)
+        mapping_groups = self._group_by_mapping(merged, connector_graph)
+
+        return {
+            "parsed": merged,
+            "connector_graph": connector_graph,
+            "parameters": parameters,
+            "analysis": analysis,
+            "mapping_groups": mapping_groups,
+            "error": False,
+        }
+
+    @staticmethod
+    def _deduplicate_by_name(items: list) -> list:
+        """Remove duplicate items sharing the same 'name' key."""
+        seen: set[str] = set()
+        result = []
+        for item in items:
+            name = item.get("name", "")
+            if name not in seen:
+                seen.add(name)
+                result.append(item)
+        return result
+
     async def migrate(
-        self, xml_content: str, filename: str = "workflow.xml",
+        self, xml_content: str | list[str], filename: str = "workflow.xml",
         parameter_overrides: dict[str, str] | None = None,
         parameter_file_content: str | None = None,
         table_naming_config: dict | None = None,
         enable_reconciliation: bool = True,
         reconciliation_threshold_pct: float = 5.0,
+        selected_mappings: list[str] | None = None,
+        connection_config: dict | None = None,
+        use_cache: bool = True,
     ) -> dict:
         """Main entry: parse, build connector graph, process per-mapping, score."""
 
         # Steps 1-5: Run heavy CPU-bound parsing in thread pool
-        prep = await asyncio.to_thread(self._heavy_parse_and_analyze, xml_content)
+        # Support multi-XML input (Item 1)
+        xml_list = xml_content if isinstance(xml_content, list) else [xml_content]
+        if len(xml_list) == 1:
+            prep = await asyncio.to_thread(
+                self._heavy_parse_and_analyze, xml_list[0], use_cache,
+            )
+        else:
+            prep = await asyncio.to_thread(
+                self._heavy_parse_and_analyze_multi, xml_list,
+            )
         if prep["error"]:
             return prep["parsed"]
 
@@ -268,6 +383,13 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         parameters = prep["parameters"]
         analysis = prep["analysis"]
         mapping_groups = prep["mapping_groups"]
+
+        # Selective mapping mode (Item 30)
+        if selected_mappings:
+            mapping_groups = {
+                k: v for k, v in mapping_groups.items()
+                if k in selected_mappings
+            }
 
         # Merge parameter overrides from .par file and/or explicit overrides
         if parameter_file_content:
@@ -286,6 +408,9 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         )
         self._enable_reconciliation = enable_reconciliation
         self._reconciliation_threshold_pct = reconciliation_threshold_pct
+        self._connection_config = (
+            ConnectionConfig(connections=connection_config) if connection_config else None
+        )
 
         # Step 6: Process mappings — LLM-assisted when available, else rule-based
         LLM_CONCURRENCY = 10
@@ -444,6 +569,12 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', mr["mapping_name"].lower())
                 mapping_sql_files[f"{sanitized}.sql"] = mr["sql"]
 
+        # Step 16: Generate optional output formats
+        test_sql_files = self._generate_unit_tests(mapping_results, parsed)
+        cost_estimate = self._estimate_costs(parsed, mapping_results)
+        dbt_files = self._generate_dbt_models(mapping_results, parsed, parameters)
+        terraform_files = self._generate_terraform(parsed, mapping_results)
+
         logger.info(
             "Migration complete: %d mapping_results, %d sql_files, %d sql_parts in combined",
             len(mapping_results), len(mapping_sql_files), len(all_sql_parts),
@@ -473,6 +604,11 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "validation_warnings": all_validations,
             "mapping_confidence": self._mapping_confidences,
             "confidence_summary": self._build_confidence_summary(),
+            # Long-term output formats
+            "test_sql_files": test_sql_files,
+            "cost_estimate": cost_estimate,
+            "dbt_files": dbt_files,
+            "terraform_files": terraform_files,
         }
 
     # ── XML Parsing ──────────────────────────────────────────────
@@ -497,12 +633,22 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         }
 
         for source in root.iter("SOURCE"):
+            db_type = source.get("DATABASETYPE", source.get("DBDNAME", ""))
+            is_flat = db_type.upper() in FLAT_FILE_TYPES if db_type else False
             src = {
                 "name": source.get("NAME", ""),
-                "database_type": source.get("DATABASETYPE", source.get("DBDNAME", "")),
+                "database_type": db_type,
                 "owner": source.get("OWNERNAME", ""),
                 "columns": [],
+                "is_flat_file": is_flat,
             }
+            if is_flat:
+                src["file_format"] = {
+                    "delimiter": source.get("DELIMITER", ","),
+                    "encoding": source.get("CODEPAGE", "UTF-8"),
+                    "header_rows": int(source.get("SKIPROWS", "0") or "0"),
+                    "null_character": source.get("NULLCHARTYPE", ""),
+                }
             for field in source.iter("SOURCEFIELD"):
                 src["columns"].append({
                     "name": field.get("NAME", ""),
@@ -811,6 +957,403 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
         return result
 
+    # ── Item 38: Chunked/Streaming XML Parser (iterparse) ───────
+
+    # Threshold in bytes above which iterparse is preferred (5 MB)
+    _ITERPARSE_THRESHOLD = 5 * 1024 * 1024
+
+    def _parse_xml_iterparse(self, xml_content: str) -> dict:
+        """Memory-efficient streaming XML parser using iterparse.
+
+        Produces identical output to ``_parse_xml()`` but processes
+        elements incrementally and clears them after extraction,
+        keeping peak memory usage low for very large (>5 MB) exports.
+        """
+        import io
+
+        result: dict[str, list] = {
+            "sources": [], "targets": [], "transformations": [],
+            "mappings": [], "workflows": [], "sessions": [], "connectors": [],
+            "mapplets": [], "worklets": [], "workflow_links": [],
+            "task_instances": [], "command_tasks": [],
+            "event_wait_tasks": [], "decision_tasks": [],
+        }
+
+        # State tracking for nested elements
+        _current_mapping: dict | None = None
+        _current_mapplet: dict | None = None
+        _current_worklet: dict | None = None
+        _current_workflow: dict | None = None
+        _current_session: dict | None = None
+        # Depth counters to handle nesting
+        _mapping_depth = 0
+        _mapplet_depth = 0
+        _worklet_depth = 0
+        _workflow_depth = 0
+        _session_depth = 0
+
+        # Helper: extract fields from a TRANSFORMATION element
+        def _extract_transformation(elem) -> dict:
+            tf = {
+                "name": elem.get("NAME", ""),
+                "type": elem.get("TYPE", ""),
+                "description": elem.get("DESCRIPTION", ""),
+                "fields": [],
+                "properties": {},
+            }
+            for field in elem.iter("TRANSFORMFIELD"):
+                tf["fields"].append({
+                    "name": field.get("NAME", ""),
+                    "datatype": field.get("DATATYPE", ""),
+                    "expression": field.get("EXPRESSION", ""),
+                    "porttype": field.get("PORTTYPE", ""),
+                    "group": field.get("GROUP", ""),
+                })
+            for prop in elem.iter("TABLEATTRIBUTE"):
+                tf["properties"][prop.get("NAME", "")] = prop.get("VALUE", "")
+            return tf
+
+        stream = io.BytesIO(xml_content.strip().encode("utf-8"))
+
+        try:
+            context = ET.iterparse(stream, events=("start", "end"))
+        except ET.ParseError as e:
+            return {
+                "error": f"Invalid XML: {str(e)}",
+                "sources": [], "targets": [], "transformations": [],
+                "mappings": [], "workflows": [], "sessions": [], "connectors": [],
+            }
+
+        try:
+            _iter = iter(context)
+        except ET.ParseError as e:
+            return {
+                "error": f"Invalid XML: {str(e)}",
+                "sources": [], "targets": [], "transformations": [],
+                "mappings": [], "workflows": [], "sessions": [], "connectors": [],
+            }
+
+        while True:
+            try:
+                event, elem = next(_iter)
+            except StopIteration:
+                break
+            except ET.ParseError as e:
+                return {
+                    "error": f"Invalid XML during parsing: {str(e)}",
+                    "sources": [], "targets": [], "transformations": [],
+                    "mappings": [], "workflows": [], "sessions": [], "connectors": [],
+                }
+            tag = elem.tag
+
+            # ── START events: track nesting ──
+            if event == "start":
+                if tag == "MAPPING":
+                    _mapping_depth += 1
+                    if _mapping_depth == 1:
+                        _current_mapping = {
+                            "name": elem.get("NAME", ""),
+                            "description": elem.get("DESCRIPTION", ""),
+                            "mapping_transformations": [],
+                            "mapping_connectors": [],
+                            "source_instance_names": [],
+                            "target_instance_names": [],
+                            "mapplet_instance_names": [],
+                            "instances": [],
+                        }
+                elif tag == "MAPPLET":
+                    _mapplet_depth += 1
+                    if _mapplet_depth == 1:
+                        _current_mapplet = {
+                            "name": elem.get("NAME", ""),
+                            "description": elem.get("DESCRIPTION", ""),
+                            "transformations": [],
+                            "connectors": [],
+                            "input_ports": [],
+                            "output_ports": [],
+                        }
+                elif tag == "WORKLET":
+                    _worklet_depth += 1
+                    if _worklet_depth == 1:
+                        _current_worklet = {
+                            "name": elem.get("NAME", ""),
+                            "description": elem.get("DESCRIPTION", ""),
+                            "tasks": [],
+                            "links": [],
+                        }
+                elif tag == "WORKFLOW":
+                    _workflow_depth += 1
+                    if _workflow_depth == 1:
+                        _current_workflow = {
+                            "name": elem.get("NAME", ""),
+                            "description": elem.get("DESCRIPTION", ""),
+                            "scheduler": {},
+                        }
+                elif tag == "SESSION":
+                    _session_depth += 1
+                    if _session_depth == 1:
+                        _current_session = {
+                            "name": elem.get("NAME", ""),
+                            "mapping_name": elem.get("MAPPINGNAME", ""),
+                            "description": elem.get("DESCRIPTION", ""),
+                            "transformation_overrides": {},
+                            "parameter_filename": "",
+                        }
+                continue
+
+            # ── END events: extract and clear ──
+            if tag == "SOURCE" and _mapping_depth == 0 and _mapplet_depth == 0:
+                db_type = elem.get("DATABASETYPE", elem.get("DBDNAME", ""))
+                is_flat = db_type.upper() in FLAT_FILE_TYPES if db_type else False
+                src = {
+                    "name": elem.get("NAME", ""),
+                    "database_type": db_type,
+                    "owner": elem.get("OWNERNAME", ""),
+                    "columns": [],
+                    "is_flat_file": is_flat,
+                }
+                if is_flat:
+                    src["file_format"] = {
+                        "delimiter": elem.get("DELIMITER", ","),
+                        "encoding": elem.get("CODEPAGE", "UTF-8"),
+                        "header_rows": int(elem.get("SKIPROWS", "0") or "0"),
+                        "null_character": elem.get("NULLCHARTYPE", ""),
+                    }
+                for field in elem.iter("SOURCEFIELD"):
+                    src["columns"].append({
+                        "name": field.get("NAME", ""),
+                        "datatype": field.get("DATATYPE", ""),
+                        "precision": field.get("PRECISION", ""),
+                        "scale": field.get("SCALE", ""),
+                        "nullable": field.get("NULLABLE", ""),
+                    })
+                result["sources"].append(src)
+                elem.clear()
+
+            elif tag == "TARGET" and _mapping_depth == 0 and _mapplet_depth == 0:
+                tgt = {
+                    "name": elem.get("NAME", ""),
+                    "database_type": elem.get("DATABASETYPE", elem.get("DBDNAME", "")),
+                    "owner": elem.get("OWNERNAME", ""),
+                    "columns": [],
+                }
+                for field in elem.iter("TARGETFIELD"):
+                    tgt["columns"].append({
+                        "name": field.get("NAME", ""),
+                        "datatype": field.get("DATATYPE", ""),
+                        "precision": field.get("PRECISION", ""),
+                        "scale": field.get("SCALE", ""),
+                        "nullable": field.get("NULLABLE", ""),
+                        "key_type": field.get("KEYTYPE", ""),
+                    })
+                result["targets"].append(tgt)
+                elem.clear()
+
+            elif tag == "TRANSFORMATION":
+                if _current_mapping and _mapplet_depth == 0:
+                    # Inline mapping transformation
+                    tf = _extract_transformation(elem)
+                    _current_mapping["mapping_transformations"].append(tf)
+                elif _current_mapplet:
+                    # Mapplet transformation
+                    tf = _extract_transformation(elem)
+                    _current_mapplet["transformations"].append(tf)
+                    # Capture input/output ports
+                    if elem.get("TYPE") == "Input Transformation":
+                        for f in tf["fields"]:
+                            _current_mapplet["input_ports"].append(f)
+                    elif elem.get("TYPE") == "Output Transformation":
+                        for f in tf["fields"]:
+                            _current_mapplet["output_ports"].append(f)
+                elif _mapping_depth == 0 and _mapplet_depth == 0:
+                    # Top-level / folder transformation
+                    result["transformations"].append(_extract_transformation(elem))
+                elem.clear()
+
+            elif tag == "INSTANCE" and _current_mapping:
+                inst_type = (elem.get("TYPE") or "").upper()
+                tf_name = elem.get("TRANSFORMATION_NAME", "")
+                inst_name = elem.get("NAME", "")
+                inst_record = {
+                    "name": inst_name,
+                    "type": inst_type,
+                    "transformation_name": tf_name,
+                    "transformation_type": elem.get("TRANSFORMATION_TYPE", ""),
+                }
+                _current_mapping["instances"].append(inst_record)
+                if inst_type == "SOURCE" and tf_name:
+                    _current_mapping["source_instance_names"].append(tf_name)
+                elif inst_type == "TARGET" and tf_name:
+                    _current_mapping["target_instance_names"].append(tf_name)
+                elif inst_type == "MAPPLET" or elem.get("TRANSFORMATION_TYPE", "") == "Mapplet":
+                    _current_mapping["mapplet_instance_names"].append(tf_name)
+                elem.clear()
+
+            elif tag == "CONNECTOR":
+                conn_dict = {
+                    "from_instance": elem.get("FROMINSTANCE", ""),
+                    "from_field": elem.get("FROMFIELD", ""),
+                    "to_instance": elem.get("TOINSTANCE", ""),
+                    "to_field": elem.get("TOFIELD", ""),
+                }
+                if _current_mapping and _mapplet_depth == 0:
+                    _current_mapping["mapping_connectors"].append(conn_dict)
+                elif _current_mapplet:
+                    _current_mapplet["connectors"].append(conn_dict)
+                else:
+                    result["connectors"].append(conn_dict)
+                elem.clear()
+
+            elif tag == "SCHEDULER" and _current_workflow:
+                _current_workflow["scheduler"] = {
+                    "type": elem.get("SCHEDULETYPE", ""),
+                    "repeat": elem.get("REPEAT", ""),
+                    "start_date": elem.get("STARTDATE", ""),
+                    "start_time": elem.get("STARTTIME", ""),
+                }
+                elem.clear()
+
+            elif tag == "TASKINSTANCE":
+                if _current_worklet:
+                    _current_worklet["tasks"].append({
+                        "name": elem.get("NAME", ""),
+                        "type": elem.get("TASKTYPE", ""),
+                        "task_name": elem.get("TASKNAME", ""),
+                        "is_valid": elem.get("ISVALID", "YES"),
+                        "reusable": elem.get("REUSABLE", "NO"),
+                    })
+                elif _current_workflow:
+                    result["task_instances"].append({
+                        "name": elem.get("NAME", ""),
+                        "type": elem.get("TASKTYPE", ""),
+                        "task_name": elem.get("TASKNAME", ""),
+                        "is_valid": elem.get("ISVALID", "YES"),
+                        "reusable": elem.get("REUSABLE", "NO"),
+                        "workflow": _current_workflow["name"],
+                    })
+                elem.clear()
+
+            elif tag == "WORKFLOWLINK":
+                link = {
+                    "from_task": elem.get("FROMTASK", ""),
+                    "to_task": elem.get("TOTASK", ""),
+                    "condition": elem.get("CONDITION", ""),
+                }
+                if _current_worklet:
+                    _current_worklet["links"].append(link)
+                elif _current_workflow:
+                    link["workflow"] = _current_workflow["name"]
+                    result["workflow_links"].append(link)
+                elem.clear()
+
+            elif tag == "TASK":
+                task_type = elem.get("TYPE", "").upper()
+                if task_type == "COMMAND":
+                    cmd_task = {
+                        "name": elem.get("NAME", ""),
+                        "type": "COMMAND",
+                        "description": elem.get("DESCRIPTION", ""),
+                        "commands": [],
+                    }
+                    for attr in elem.iter("ATTRIBUTE"):
+                        if attr.get("NAME", "").startswith("CmdLine"):
+                            cmd_task["commands"].append(attr.get("VALUE", ""))
+                    result["command_tasks"].append(cmd_task)
+                elif task_type == "EVENT WAIT":
+                    ew_task = {
+                        "name": elem.get("NAME", ""),
+                        "type": "EVENT_WAIT",
+                        "description": elem.get("DESCRIPTION", ""),
+                        "filewatch_name": "",
+                        "delete_file": False,
+                        "user_defined_event": False,
+                    }
+                    for attr in elem.iter("ATTRIBUTE"):
+                        attr_name = attr.get("NAME", "")
+                        attr_value = attr.get("VALUE", "")
+                        if attr_name == "Filewatch name":
+                            ew_task["filewatch_name"] = attr_value
+                        elif attr_name == "Delete Filewatch file":
+                            ew_task["delete_file"] = attr_value.upper() == "YES"
+                        elif attr_name == "User Defined Event":
+                            ew_task["user_defined_event"] = attr_value.upper() == "YES"
+                    result["event_wait_tasks"].append(ew_task)
+                elif task_type == "DECISION":
+                    dec_task = {
+                        "name": elem.get("NAME", ""),
+                        "type": "DECISION",
+                        "description": elem.get("DESCRIPTION", ""),
+                        "conditions": [],
+                    }
+                    for attr in elem.iter("ATTRIBUTE"):
+                        attr_name = attr.get("NAME", "")
+                        attr_value = attr.get("VALUE", "")
+                        if "condition" in attr_name.lower() or attr_name == "Decision Name":
+                            dec_task["conditions"].append({
+                                "name": attr_name,
+                                "condition": attr_value,
+                            })
+                    result["decision_tasks"].append(dec_task)
+                elem.clear()
+
+            elif tag == "SESSTRANSFORMATIONINST" and _current_session:
+                inst_name = elem.get("TRANSFORMATIONNAME", "") or elem.get("SINSTANCENAME", "")
+                overrides = {}
+                for tattr in elem.iter("TABLEATTRIBUTE"):
+                    ta_name = tattr.get("NAME", "")
+                    ta_value = tattr.get("VALUE", "")
+                    if ta_name in ("Pre SQL", "Post SQL", "Sql Query", "Source Filter",
+                                   "Table Name Prefix", "Target Table Name", "Owner Name"):
+                        ta_value = (ta_value.replace("&#xD;&#xA;", "\n")
+                                    .replace("&#xA;", "\n").replace("&#xD;", "\n"))
+                        overrides[ta_name] = ta_value
+                if overrides:
+                    _current_session["transformation_overrides"][inst_name] = overrides
+                elem.clear()
+
+            elif tag == "ATTRIBUTE" and _current_session and _session_depth == 1:
+                if elem.get("NAME", "") == "Parameter Filename":
+                    _current_session["parameter_filename"] = elem.get("VALUE", "")
+                # Don't clear — parent element may still need child attrs
+
+            # ── Container close events ──
+            elif tag == "MAPPING":
+                _mapping_depth -= 1
+                if _mapping_depth == 0 and _current_mapping:
+                    result["mappings"].append(_current_mapping)
+                    _current_mapping = None
+                    elem.clear()
+
+            elif tag == "MAPPLET":
+                _mapplet_depth -= 1
+                if _mapplet_depth == 0 and _current_mapplet:
+                    result["mapplets"].append(_current_mapplet)
+                    _current_mapplet = None
+                    elem.clear()
+
+            elif tag == "WORKLET":
+                _worklet_depth -= 1
+                if _worklet_depth == 0 and _current_worklet:
+                    result["worklets"].append(_current_worklet)
+                    _current_worklet = None
+                    elem.clear()
+
+            elif tag == "WORKFLOW":
+                _workflow_depth -= 1
+                if _workflow_depth == 0 and _current_workflow:
+                    result["workflows"].append(_current_workflow)
+                    _current_workflow = None
+                    elem.clear()
+
+            elif tag == "SESSION":
+                _session_depth -= 1
+                if _session_depth == 0 and _current_session:
+                    result["sessions"].append(_current_session)
+                    _current_session = None
+                    elem.clear()
+
+        return result
+
     # ── Connector Graph ──────────────────────────────────────────
 
     def _build_connector_graph_from_connectors(self, connectors: list) -> dict:
@@ -1026,6 +1569,69 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             if sess.get("mapping_name") == mapping_name:
                 return sess.get("transformation_overrides", {})
         return {}
+
+    # ── Unconnected Lookup Resolution (Item 11) ────────────────
+
+    def _resolve_unconnected_lookup(self, lkp_name: str) -> dict | None:
+        """Resolve an unconnected lookup to its table, key, and output columns."""
+        parsed = getattr(self, '_current_parsed', None)
+        if not parsed:
+            return None
+        for tf in parsed.get("transformations", []):
+            if tf["type"] not in ("Lookup", "Lookup Procedure"):
+                continue
+            # Match by name suffix: LKP_CUSTOMER matches :LKP.CUSTOMER
+            tf_short = tf["name"]
+            for prefix in ("LKP_", "lkp_", "Lkp_"):
+                tf_short = tf_short.removeprefix(prefix)
+            if tf_short.upper() == lkp_name.upper() or tf["name"].upper() == lkp_name.upper():
+                table = tf.get("properties", {}).get("Lookup table name", lkp_name)
+                input_cols = [
+                    f["name"] for f in tf.get("fields", [])
+                    if "INPUT" in f.get("porttype", "").upper()
+                    and "OUTPUT" not in f.get("porttype", "").upper()
+                ]
+                output_cols = [
+                    f["name"] for f in tf.get("fields", [])
+                    if "OUTPUT" in f.get("porttype", "").upper()
+                    or "RETURN" in f.get("porttype", "").upper()
+                ]
+                return {
+                    "table": table or lkp_name,
+                    "key_col": input_cols[0] if input_cols else "id",
+                    "output_col": output_cols[0] if output_cols else "*",
+                }
+        return None
+
+    # ── Partition & Clustering Hints (Item 8) ─────────────────
+
+    def _detect_partition_cluster_columns(
+        self, columns: list,
+    ) -> tuple[str | None, list[str]]:
+        """Detect partition and cluster candidate columns from target schema.
+
+        Returns: (partition_col_name | None, [cluster_col_names up to 4])
+        """
+        partition_col = None
+        cluster_cols = []
+
+        for col in columns:
+            col_name = col.get("name", "")
+            col_type = self._map_datatype_to_bigquery(
+                col.get("datatype", ""), col.get("precision", ""), col.get("scale", ""),
+            )
+            # Partition: date/timestamp type or name heuristic
+            if not partition_col:
+                if col_type in ("DATE", "TIMESTAMP"):
+                    partition_col = col_name
+                elif _PARTITION_RE.search(col_name):
+                    partition_col = col_name
+
+            # Cluster: name heuristic (skip if already partition col)
+            if col_name != partition_col and _CLUSTER_RE.search(col_name):
+                cluster_cols.append(col_name)
+
+        return partition_col, cluster_cols[:4]  # BigQuery limit: 4 cluster cols
 
     # ── Transformation Analysis ──────────────────────────────────
 
@@ -2004,12 +2610,28 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         for i, src in enumerate(group["sources"]):
             cols = [c["name"] for c in src["columns"]] if src["columns"] else ["*"]
             src_tbl = naming.format_table(naming.prefix_staging, src['name'], is_source=True)
-            lines.append(f"-- Step {i + 1}: Extract from source ({src['name']})")
-            lines.append(f"{naming.create_stmt()} {src_tbl} AS")
-            lines.append("SELECT")
-            lines.append("  " + ",\n  ".join(cols))
-            lines.append(f"FROM {naming.format_table('', src['name'], is_source=True)}")
-            lines.append(";")
+
+            # Item 5: Flat file sources → GCS LOAD DATA
+            if src.get("is_flat_file"):
+                fmt = src.get("file_format", {})
+                gcs_path = f"gs://{{{{ var.value.gcs_bucket }}}}/data/{src['name'].lower()}.*"
+                lines.append(f"-- Step {i + 1}: Load flat file source ({src['name']}) from GCS")
+                lines.append(f"-- File format: delimiter='{fmt.get('delimiter', ',')}'"
+                             f"  header_rows={fmt.get('header_rows', 0)}")
+                lines.append(f"LOAD DATA OVERWRITE {src_tbl}")
+                lines.append(f"FROM FILES (")
+                lines.append(f"  format = 'CSV',")
+                lines.append(f"  uris = ['{gcs_path}'],")
+                lines.append(f"  field_delimiter = '{fmt.get('delimiter', ',')}',")
+                lines.append(f"  skip_leading_rows = {fmt.get('header_rows', 0)}")
+                lines.append(f");")
+            else:
+                lines.append(f"-- Step {i + 1}: Extract from source ({src['name']})")
+                lines.append(f"{naming.create_stmt()} {src_tbl} AS")
+                lines.append("SELECT")
+                lines.append("  " + ",\n  ".join(cols))
+                lines.append(f"FROM {naming.format_table('', src['name'], is_source=True)}")
+                lines.append(";")
             lines.append("")
 
         # Process transformations
@@ -2495,7 +3117,15 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                         for_ddl=True,
                     )
                     lines.append(f"--   {col['name']} {bq_type},")
-                lines.append(f"-- );")
+                # Item 8: Partition and clustering hints
+                part_col, cluster_cols = self._detect_partition_cluster_columns(tgt["columns"])
+                if part_col:
+                    lines.append(f"-- ) PARTITION BY DATE_TRUNC({part_col}, DAY)")
+                else:
+                    lines.append(f"-- )")
+                if cluster_cols:
+                    lines.append(f"-- CLUSTER BY {', '.join(cluster_cols)}")
+                lines.append(f"-- ;")
                 lines.append("")
 
         # Emit Post-SQL from session overrides
@@ -2839,9 +3469,19 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         if node_type == "lkp_ref":
             lkp_name = node["name"]
             args = [self._ast_to_bigquery(a, parameters) for a in node.get("args", [])]
+            # Item 11: Resolve unconnected lookups to scalar subqueries
+            lkp_def = self._resolve_unconnected_lookup(lkp_name)
+            if lkp_def:
+                naming = getattr(self, '_naming_config', None) or TableNamingConfig()
+                lkp_table = naming.format_table('', lkp_def["table"])
+                out_col = lkp_def["output_col"]
+                key_col = lkp_def["key_col"]
+                key_val = args[0] if args else "NULL"
+                return f"(SELECT {out_col} FROM {lkp_table} WHERE {key_col} = {key_val})"
+            # Fallback with hint
             if args:
-                return f"/* :LKP.{lkp_name} */ {args[0]}"
-            return f"/* :LKP.{lkp_name} */ NULL"
+                return f"(SELECT /* output_col */ FROM /* {lkp_name} */ WHERE /* key_col */ = {args[0]})"
+            return f"/* :LKP.{lkp_name} - unconnected, needs manual resolution */ NULL"
 
         if node_type == "call":
             name_upper = node["name"].upper()
@@ -3112,6 +3752,20 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                         case_parts.append(f"  ELSE {parts[-1].strip()}")
                     case_parts.append("END")
                     converted = "\n".join(case_parts)
+
+        # Item 14: Nested DECODE detection — if regex path left partial DECODE,
+        # retry through the AST parser for correct nesting
+        if 'DECODE' in converted.upper() and 'CASE' in converted.upper():
+            try:
+                tokens = self._tokenize_expression(expr)
+                if tokens:
+                    ast_node, _ = self._parse_expression_ast(tokens)
+                    retry = self._ast_to_bigquery(ast_node, parameters)
+                    if retry and 'TODO' not in retry:
+                        _expression_cache[expr] = retry
+                        return retry
+            except Exception:
+                pass  # keep regex result
 
         _expression_cache[expr] = converted
         return converted
@@ -4031,3 +4685,347 @@ WHERE NOT EXISTS (
         if analysis['unsupported']:
             parts.append(f"{len(analysis['unsupported'])} unsupported pattern(s) flagged for manual review.")
         return " ".join(parts)
+
+    # ══════════════════════════════════════════════════════════════
+    # LONG-TERM OUTPUT GENERATORS
+    # ══════════════════════════════════════════════════════════════
+
+    # ── Item 34: Unit Test SQL Generation ─────────────────────────
+
+    def _generate_unit_tests(
+        self, mapping_results: list, parsed: dict,
+    ) -> dict[str, str]:
+        """Generate test_*.sql files with schema/NOT-NULL/PK/row-count checks."""
+        tests: dict[str, str] = {}
+        naming = getattr(self, '_naming_config', None) or TableNamingConfig()
+        target_by_name = {t["name"]: t for t in parsed.get("targets", [])}
+
+        for mr in mapping_results:
+            mapping_name = mr["mapping_name"]
+            sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', mapping_name.lower())
+            sql_lower = mr.get("sql", "").lower()
+
+            test_lines = [
+                f"-- Unit tests for mapping: {mapping_name}",
+                f"-- Generated by Informatica Migration Agent",
+                "",
+            ]
+
+            # Find targets referenced in this mapping's SQL
+            targets_found = [
+                t for t in parsed.get("targets", [])
+                if t["name"].lower() in sql_lower
+            ]
+            if not targets_found and parsed.get("targets"):
+                targets_found = parsed["targets"][:1]
+
+            for tgt in targets_found:
+                tbl = naming.format_table('', tgt["name"].lower())
+                tgt_name = tgt["name"]
+
+                # Test 1: Row count > 0
+                test_lines.append(f"-- Test: {tgt_name} has rows")
+                test_lines.append(
+                    f"SELECT CASE WHEN COUNT(*) > 0 THEN 'PASS' ELSE 'FAIL' END "
+                    f"AS test_row_count_{tgt_name.lower()[:30]} FROM {tbl};"
+                )
+                test_lines.append("")
+
+                # Test 2: NOT NULL on key columns
+                for col in tgt.get("columns", []):
+                    if col.get("key_type") in ("PRIMARY KEY", "PRIMARY") or col.get("nullable") == "NOTNULL":
+                        test_lines.append(f"-- Test: {col['name']} NOT NULL")
+                        test_lines.append(
+                            f"SELECT CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'FAIL' END "
+                            f"AS test_{col['name'][:20]}_not_null FROM {tbl} "
+                            f"WHERE {col['name']} IS NULL;"
+                        )
+                        test_lines.append("")
+
+                # Test 3: Primary key uniqueness
+                key_cols = [
+                    c["name"] for c in tgt.get("columns", [])
+                    if c.get("key_type") in ("PRIMARY KEY", "PRIMARY")
+                ]
+                if key_cols:
+                    key_list = ", ".join(key_cols)
+                    test_lines.append(f"-- Test: Primary key uniqueness ({key_list})")
+                    test_lines.append(
+                        f"SELECT CASE WHEN COUNT(*) = COUNT(DISTINCT CONCAT("
+                        f"{', '.join(f'CAST({k} AS STRING)' for k in key_cols)})) "
+                        f"THEN 'PASS' ELSE 'FAIL' END AS test_pk_unique FROM {tbl};"
+                    )
+                    test_lines.append("")
+
+            tests[f"test_{sanitized}.sql"] = "\n".join(test_lines)
+
+        return tests
+
+    # ── Item 36: Cost Estimation ──────────────────────────────────
+
+    _AVG_BYTES_PER_TYPE: dict[str, int] = {
+        "STRING": 50, "INT64": 8, "FLOAT64": 8, "NUMERIC": 16,
+        "BIGNUMERIC": 32, "BOOL": 1, "DATE": 4, "TIMESTAMP": 8,
+        "BYTES": 100,
+    }
+    _STORAGE_PRICE_PER_GB = 0.02      # $/GB/month (active storage)
+    _ON_DEMAND_PRICE_PER_TB = 6.25    # $/TB scanned (on-demand)
+
+    def _estimate_costs(
+        self, parsed: dict, mapping_results: list,
+    ) -> dict:
+        """Estimate BigQuery processing and storage costs."""
+        storage_estimates = []
+        for tgt in parsed.get("targets", []):
+            row_bytes = sum(
+                self._AVG_BYTES_PER_TYPE.get(
+                    self._map_datatype_to_bigquery(
+                        c.get("datatype", ""), c.get("precision", ""), c.get("scale", ""),
+                    ), 50,
+                )
+                for c in tgt.get("columns", [])
+            )
+            est_rows = 1_000_000  # default estimate
+            est_gb = (row_bytes * est_rows) / (1024 ** 3)
+            storage_estimates.append({
+                "table": tgt["name"],
+                "columns": len(tgt.get("columns", [])),
+                "est_row_bytes": row_bytes,
+                "est_gb": round(est_gb, 3),
+                "monthly_cost_usd": round(est_gb * self._STORAGE_PRICE_PER_GB, 2),
+            })
+
+        compute_estimates = []
+        for mr in mapping_results:
+            sql = mr.get("sql", "")
+            join_count = sql.upper().count(" JOIN ")
+            subquery_count = sql.count("(SELECT")
+            complexity_factor = 1.0 + (join_count * 0.3) + (subquery_count * 0.5)
+            est_tb = 0.001 * complexity_factor
+            compute_estimates.append({
+                "mapping": mr["mapping_name"],
+                "est_tb_scanned": round(est_tb, 4),
+                "cost_per_run_usd": round(est_tb * self._ON_DEMAND_PRICE_PER_TB, 4),
+            })
+
+        total_storage_gb = sum(s["est_gb"] for s in storage_estimates)
+        total_monthly_storage = sum(s["monthly_cost_usd"] for s in storage_estimates)
+        total_per_run = sum(c["cost_per_run_usd"] for c in compute_estimates)
+
+        return {
+            "storage": {
+                "total_gb": round(total_storage_gb, 2),
+                "monthly_cost_usd": round(total_monthly_storage, 2),
+                "per_table": storage_estimates[:20],  # cap for payload size
+            },
+            "compute": {
+                "total_per_run_usd": round(total_per_run, 2),
+                "monthly_cost_usd_daily": round(total_per_run * 30, 2),
+                "per_mapping": compute_estimates[:20],
+            },
+            "summary": (
+                f"Est. storage: {total_storage_gb:.1f} GB "
+                f"(${total_monthly_storage:.2f}/mo), "
+                f"compute: ${total_per_run:.2f}/run "
+                f"(${total_per_run * 30:.2f}/mo if daily)"
+            ),
+            "assumptions": [
+                "Row count estimated at 1M per table (override with actual stats)",
+                f"Storage: ${self._STORAGE_PRICE_PER_GB}/GB/month (active)",
+                f"Compute: ${self._ON_DEMAND_PRICE_PER_TB}/TB (on-demand)",
+                "Complexity factor based on JOIN and subquery count",
+            ],
+        }
+
+    # ── Item 37: dbt Model Generation ─────────────────────────────
+
+    def _generate_dbt_models(
+        self, mapping_results: list, parsed: dict, parameters: list,
+    ) -> dict[str, str]:
+        """Generate dbt project files: models, schema.yml, dbt_project.yml."""
+        files: dict[str, str] = {}
+        naming = getattr(self, '_naming_config', None) or TableNamingConfig()
+
+        wf_name = parsed["workflows"][0]["name"] if parsed["workflows"] else "migration"
+        project_name = re.sub(r'[^a-zA-Z0-9_]', '_', wf_name.lower())
+
+        # dbt_project.yml
+        files["dbt_project.yml"] = (
+            f"name: '{project_name}'\n"
+            f"version: '1.0.0'\n"
+            f"config-version: 2\n\n"
+            f"profile: '{project_name}'\n\n"
+            f"model-paths: ['models']\n"
+            f"test-paths: ['tests']\n"
+            f"macro-paths: ['macros']\n\n"
+            f"models:\n"
+            f"  {project_name}:\n"
+            f"    staging:\n"
+            f"      +materialized: view\n"
+            f"      +schema: staging\n"
+            f"    marts:\n"
+            f"      +materialized: table\n"
+            f"      +schema: marts\n"
+        )
+
+        # Staging models (one per source)
+        source_refs: dict[str, str] = {}
+        for src in parsed.get("sources", []):
+            sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', src["name"].lower())
+            ref_name = f"stg_{sanitized}"
+            source_refs[src["name"]] = ref_name
+            cols = [c["name"] for c in src.get("columns", [])]
+            col_sql = ",\n    ".join(cols) if cols else "*"
+            files[f"models/staging/{ref_name}.sql"] = (
+                f"-- Staging model for source: {src['name']}\n"
+                f"{{{{ config(materialized='view') }}}}\n\n"
+                f"SELECT\n    {col_sql}\n"
+                f"FROM {{{{ source('{project_name}', '{src['name'].lower()}') }}}}\n"
+            )
+
+        # Mart models (one per mapping)
+        for mr in mapping_results:
+            sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', mr["mapping_name"].lower())
+            sql = mr.get("sql", "")
+            # Convert table refs to dbt ref() macros
+            dbt_sql = sql
+            for src_name, ref_name in source_refs.items():
+                src_tbl = naming.format_table(naming.prefix_staging, src_name, is_source=True)
+                dbt_sql = dbt_sql.replace(src_tbl, f"{{{{ ref('{ref_name}') }}}}")
+                dbt_sql = dbt_sql.replace(
+                    naming.format_table('', src_name, is_source=True),
+                    f"{{{{ ref('{ref_name}') }}}}",
+                )
+
+            config = (
+                "{{ config(\n"
+                "    materialized='table',\n"
+                "    tags=['informatica-migration']\n"
+                ") }}\n\n"
+            )
+            files[f"models/marts/{sanitized}.sql"] = config + dbt_sql
+
+        # schema.yml
+        schema_lines = [
+            "version: 2\n",
+            "sources:",
+            f"  - name: {project_name}",
+            "    tables:",
+        ]
+        for src in parsed.get("sources", []):
+            schema_lines.append(f"      - name: {src['name'].lower()}")
+            if src.get("columns"):
+                schema_lines.append("        columns:")
+                for col in src["columns"][:20]:
+                    schema_lines.append(f"          - name: {col['name']}")
+        schema_lines.append("")
+        schema_lines.append("models:")
+        for mr in mapping_results[:30]:
+            sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', mr["mapping_name"].lower())
+            schema_lines.append(f"  - name: {sanitized}")
+            mname = mr["mapping_name"]
+            schema_lines.append(f"    description: 'Migrated from {mname}'")
+
+        files["models/schema.yml"] = "\n".join(schema_lines)
+
+        return files
+
+    # ── Item 33: Terraform Export ─────────────────────────────────
+
+    def _generate_terraform(
+        self, parsed: dict, mapping_results: list,
+    ) -> dict[str, str]:
+        """Generate Terraform HCL for BigQuery resources and Composer."""
+        files: dict[str, str] = {}
+        naming = getattr(self, '_naming_config', None) or TableNamingConfig()
+
+        # main.tf
+        files["terraform/main.tf"] = (
+            'terraform {\n'
+            '  required_providers {\n'
+            '    google = {\n'
+            '      source  = "hashicorp/google"\n'
+            '      version = "~> 5.0"\n'
+            '    }\n'
+            '  }\n'
+            '}\n\n'
+            'provider "google" {\n'
+            '  project = var.project_id\n'
+            '  region  = var.region\n'
+            '}\n'
+        )
+
+        # variables.tf
+        files["terraform/variables.tf"] = (
+            'variable "project_id" {\n'
+            f'  default = "{naming.project}"\n'
+            '}\n\n'
+            'variable "region" {\n'
+            '  default = "us-central1"\n'
+            '}\n\n'
+            'variable "dataset_id" {\n'
+            f'  default = "{naming.dataset}"\n'
+            '}\n'
+        )
+
+        # bigquery.tf — dataset + tables
+        bq_lines = [
+            'resource "google_bigquery_dataset" "main" {',
+            '  dataset_id = var.dataset_id',
+            '  project    = var.project_id',
+            '  location   = var.region',
+            '}',
+            '',
+        ]
+        for tgt in parsed.get("targets", []):
+            tgt_id = re.sub(r'[^a-zA-Z0-9_]', '_', tgt["name"].lower())
+            bq_lines.append(f'resource "google_bigquery_table" "{tgt_id}" {{')
+            bq_lines.append(f'  dataset_id = google_bigquery_dataset.main.dataset_id')
+            bq_lines.append(f'  table_id   = "{tgt["name"].lower()}"')
+            bq_lines.append(f'  project    = var.project_id')
+            # Schema
+            bq_lines.append(f'  schema = jsonencode([')
+            for col in tgt.get("columns", []):
+                bq_type = self._map_datatype_to_bigquery(
+                    col.get("datatype", ""), col.get("precision", ""), col.get("scale", ""),
+                )
+                nullable = "NULLABLE" if col.get("nullable") != "NOTNULL" else "REQUIRED"
+                bq_lines.append(
+                    f'    {{"name": "{col["name"]}", "type": "{bq_type}", '
+                    f'"mode": "{nullable}"}},'
+                )
+            bq_lines.append(f'  ])')
+            # Partition
+            part_col, cluster_cols = self._detect_partition_cluster_columns(tgt.get("columns", []))
+            if part_col:
+                bq_lines.append(f'  time_partitioning {{')
+                bq_lines.append(f'    type  = "DAY"')
+                bq_lines.append(f'    field = "{part_col}"')
+                bq_lines.append(f'  }}')
+            if cluster_cols:
+                bq_lines.append(f'  clustering = [{", ".join(f"{chr(34)}{c}{chr(34)}" for c in cluster_cols)}]')
+            bq_lines.append(f'}}')
+            bq_lines.append('')
+
+        files["terraform/bigquery.tf"] = "\n".join(bq_lines)
+
+        # composer.tf
+        wf_name = parsed["workflows"][0]["name"] if parsed["workflows"] else "migration"
+        comp_id = re.sub(r'[^a-zA-Z0-9_-]', '-', wf_name.lower())
+        files["terraform/composer.tf"] = (
+            f'resource "google_composer_environment" "{comp_id}" {{\n'
+            f'  name    = "{comp_id}"\n'
+            f'  project = var.project_id\n'
+            f'  region  = var.region\n\n'
+            f'  config {{\n'
+            f'    software_config {{\n'
+            f'      image_version = "composer-2.9.7-airflow-2.9.3"\n'
+            f'    }}\n'
+            f'    node_config {{\n'
+            f'      service_account = "composer-sa@${{var.project_id}}.iam.gserviceaccount.com"\n'
+            f'    }}\n'
+            f'  }}\n'
+            f'}}\n'
+        )
+
+        return files

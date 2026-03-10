@@ -66,6 +66,9 @@ async def informatica_migrate_advanced(request: InformaticaMigrateRequest):
         table_naming_config=request.table_naming_config,
         enable_reconciliation=request.enable_reconciliation,
         reconciliation_threshold_pct=request.reconciliation_threshold_pct,
+        selected_mappings=request.selected_mappings,
+        connection_config=request.connection_config,
+        use_cache=request.use_cache,
     )
 
     # Record activity
