@@ -516,15 +516,37 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         if analysis["has_scd_pattern"] and parsed["targets"]:
             scd_merge = self._generate_scd_merge(parsed)
 
-        # Step 10: Build transformation map
+        # Step 10: Build transformation map — includes ALL transformations:
+        # folder-level reusable (from analysis), per-mapping, and per-mapplet.
         transformation_map = []
-        for tf_summary in analysis["transformation_summary"]:
+        _seen_tf_keys: set[str] = set()
+
+        def _add_to_transform_map(tf_name: str, tf_type: str) -> None:
+            key = f"{tf_name}|{tf_type}"
+            if key in _seen_tf_keys:
+                return
+            _seen_tf_keys.add(key)
+            mapping = TRANSFORMATION_MAP.get(tf_type, {})
             transformation_map.append({
-                "informatica": f"{tf_summary['name']} ({tf_summary['type']})",
-                "gcp": tf_summary["gcp_equivalent"],
-                "type": tf_summary["convertible"],
+                "informatica": f"{tf_name} ({tf_type})",
+                "gcp": mapping.get("gcp", "Manual review required"),
+                "type": mapping.get("type", "manual"),
                 "sql": "",
             })
+
+        # 1. Folder-level reusable transformations (already in analysis summary)
+        for tf_summary in analysis["transformation_summary"]:
+            _add_to_transform_map(tf_summary["name"], tf_summary["type"])
+
+        # 2. Per-mapping inline transformations (1,257 in wkfl_ALV_100_MAIN_LOAD)
+        for mp in parsed.get("mappings", []):
+            for tf in mp.get("mapping_transformations", []):
+                _add_to_transform_map(tf.get("name", ""), tf.get("type", ""))
+
+        # 3. Per-mapplet transformations (319 in wkfl_ALV_100_MAIN_LOAD)
+        for mplt in parsed.get("mapplets", []):
+            for tf in mplt.get("transformations", []):
+                _add_to_transform_map(tf.get("name", ""), tf.get("type", ""))
 
         # Step 11: Build unsupported list
         unsupported = []
@@ -701,7 +723,19 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 })
             result["targets"].append(tgt)
 
+        # Collect only FOLDER-LEVEL (non-nested) TRANSFORMATION elements.
+        # Per-mapping and per-mapplet transformations are parsed separately below
+        # to match the behaviour of _parse_xml_iterparse (which only stores
+        # folder-level ones in result["transformations"]).
+        _nested_xform_ids: set[int] = set()
+        for container_tag in ("MAPPING", "MAPPLET"):
+            for container in root.iter(container_tag):
+                for xf in container.iter("TRANSFORMATION"):
+                    _nested_xform_ids.add(id(xf))
+
         for xform in root.iter("TRANSFORMATION"):
+            if id(xform) in _nested_xform_ids:
+                continue  # skip — handled in the MAPPING / MAPPLET loops below
             tf = {
                 "name": xform.get("NAME", ""),
                 "type": xform.get("TYPE", ""),
@@ -1910,8 +1944,15 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
     def _analyze_transformations(self, parsed: dict) -> dict:
         """Analyze transformations and categorize them."""
+        # Count ALL transformations: folder-level + per-mapping + per-mapplet
+        per_mapping_count = sum(
+            len(mp.get("mapping_transformations", [])) for mp in parsed.get("mappings", [])
+        )
+        per_mapplet_count = sum(
+            len(mplt.get("transformations", [])) for mplt in parsed.get("mapplets", [])
+        )
         analysis = {
-            "total_transformations": len(parsed["transformations"]),
+            "total_transformations": len(parsed["transformations"]) + per_mapping_count + per_mapplet_count,
             "sql_convertible": 0,
             "needs_dataflow": 0,
             "unsupported": [],
@@ -2550,17 +2591,47 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 if col_info.get("resolved") and col_info.get("source_col"):
                     cols.append((col_name, col_info["source_col"]))
                 else:
-                    # Try to find via field expressions in transformations
+                    # Try to find via field expressions in transformations.
+                    # Pass 1: exact name match + non-empty expression
+                    # Pass 2: case-insensitive name match (Informatica column names vary)
+                    # Pass 3: passthrough field — same name, empty expression → use col name
+                    # Pass 4: source column direct match (no transformation needed)
                     found = False
+                    col_name_upper = col_name.upper()
+                    passthrough_candidate: str | None = None
+
                     for tf in group.get("transformations", []):
                         for f in tf.get("fields", []):
-                            if f["name"] == col_name and f.get("expression"):
-                                expr = self._convert_expression(f["expression"], parameters)
-                                cols.append((col_name, expr))
-                                found = True
+                            f_name_upper = f["name"].upper()
+                            if f_name_upper == col_name_upper:
+                                raw_expr = f.get("expression", "").strip()
+                                if raw_expr:
+                                    expr = self._convert_expression(raw_expr, parameters)
+                                    cols.append((col_name, expr))
+                                    found = True
+                                elif passthrough_candidate is None:
+                                    # Empty expression = passthrough; keep as candidate
+                                    passthrough_candidate = col_name
                                 break
                         if found:
                             break
+
+                    if not found and passthrough_candidate is not None:
+                        # Passthrough field — column flows through unchanged
+                        cols.append((col_name, passthrough_candidate))
+                        found = True
+
+                    if not found:
+                        # Last resort: check source columns for a matching name
+                        for src in group.get("sources", []):
+                            for src_col in src.get("columns", []):
+                                if src_col["name"].upper() == col_name_upper:
+                                    cols.append((col_name, col_name))
+                                    found = True
+                                    break
+                            if found:
+                                break
+
                     if not found:
                         cols.append((col_name, f"NULL /* TODO: resolve {col_name} */"))
             result[tgt_name] = cols
@@ -3375,7 +3446,9 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 for field in tf.get("fields", []):
                     expr = field.get("expression", "")
                     if expr:
-                        lines.append(f"--   {field['name']} = {expr}")
+                        # Convert IIF/DECODE etc. to BigQuery equivalents even in comments
+                        converted_expr = self._convert_expression(expr, parameters)
+                        lines.append(f"--   {field['name']} = {converted_expr}")
                 lines.append("-- (Applied via MERGE in final target load)")
                 lines.append("")
                 step += 1
@@ -4708,14 +4781,23 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             # Convert SQL boolean literals to Python — Informatica uses TRUE/FALSE
             py_cond = re.sub(r'\bTRUE\b', 'True', py_cond)
             py_cond = re.sub(r'\bFALSE\b', 'False', py_cond)
-            # Convert Informatica workflow variable status checks to XCom-based checks
-            # e.g. $wklt_ALV_400_ILEC.Status=Succeeded → kwargs['ti'].xcom_pull(...)
+            # Convert Informatica workflow variable status checks to Airflow task-state checks.
+            # e.g. $wklt_ALV_400_ILEC.Status=Succeeded
+            #   → _check_task_state(kwargs, 'wklt_alv_400_ilec', 'success')
+            _state_map = {
+                'succeeded': 'success',
+                'failed': 'failed',
+                'disabled': 'skipped',
+                'running': 'running',
+            }
+
             def _replace_wf_status(m: re.Match) -> str:
-                task_var = m.group(1).lstrip('$').replace('.', '_').lower()
-                status = m.group(2)
-                if status.lower() == 'succeeded':
-                    return f"kwargs.get('dag_run') is not None"  # placeholder: Succeeded == ran
-                return f"True  # TODO: check {m.group(0)}"
+                raw_ref = m.group(1)  # e.g. "$wklt_ALV_400_ILEC"
+                status = m.group(2)   # e.g. "Succeeded"
+                task_id = re.sub(r'[^a-zA-Z0-9_]', '_', raw_ref.lstrip('$')).lower().strip('_')
+                airflow_state = _state_map.get(status.lower(), status.lower())
+                return f"_check_task_state(kwargs, '{task_id}', '{airflow_state}')"
+
             py_cond = re.sub(
                 r'(\$[\w.]+)\.Status\s*=\s*(\w+)',
                 _replace_wf_status,
@@ -4849,6 +4931,21 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "    if sql_path.exists():",
             "        return sql_path.read_text(encoding='utf-8')",
             '    return f"-- ERROR: SQL file not found: {filename}"',
+            "",
+            "",
+            "def _check_task_state(kwargs: dict, task_id: str, expected_state: str) -> bool:",
+            '    """Check whether an upstream task (or TaskGroup member) reached expected_state.',
+            "",
+            "    Used by BranchPythonOperator callables to replicate Informatica",
+            '    ``$wklt_XYZ.Status = Succeeded/Failed/Disabled`` conditions.',
+            '    """',
+            "    dag_run = kwargs.get('dag_run')",
+            "    if not dag_run:",
+            "        return True  # Outside DAG context — default to truthy",
+            "    for ti in dag_run.get_task_instances():",
+            "        if ti.task_id == task_id or ti.task_id.startswith(task_id + '.'):",
+            "            return ti.state == expected_state",
+            "    return False",
             "",
             "",
             "default_args = {",
