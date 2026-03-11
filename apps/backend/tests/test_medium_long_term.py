@@ -92,13 +92,17 @@ MINI_XML = textwrap.dedent("""\
         <INSTANCE NAME="SRC_ORDERS" TYPE="SOURCE" TRANSFORMATION_NAME="SRC_ORDERS" TRANSFORMATION_TYPE="Source"/>
         <INSTANCE NAME="TGT_ORDERS" TYPE="TARGET" TRANSFORMATION_NAME="TGT_ORDERS" TRANSFORMATION_TYPE="Target"/>
       </MAPPING>
-      <WORKFLOW NAME="wkfl_daily_load" DESCRIPTION="Daily load workflow">
-        <SCHEDULER SCHEDULETYPE="DAILY" REPEAT="1" STARTDATE="2024-01-01" STARTTIME="06:00:00"/>
-        <TASKINSTANCE NAME="s_load_orders" TASKTYPE="Session" TASKNAME="s_load_orders" ISVALID="YES" REUSABLE="NO"/>
-        <WORKFLOWLINK FROMTASK="Start" TOTASK="s_load_orders" CONDITION=""/>
-      </WORKFLOW>
       <TASK NAME="cmd_pre_cleanup" TYPE="Command" DESCRIPTION="Pre-cleanup task">
         <ATTRIBUTE NAME="CmdLine1" VALUE="echo cleanup"/>
+      </TASK>
+      <TASK NAME="cmd_sftp_vframe" TYPE="Command" DESCRIPTION="SFTP transfer">
+        <VALUEPAIR NAME="Command1" VALUE="$PMRootDir/ETL_SCRIPTS/alv_sftp_vframe.ksh"/>
+        <VALUEPAIR NAME="Command2" VALUE="$PMRootDir/ETL_SCRIPTS/alv_post_sftp.ksh"/>
+      </TASK>
+      <TASK NAME="email_success" TYPE="Email" DESCRIPTION="Success notification">
+        <ATTRIBUTE NAME="Email Subject" VALUE="Job Complete"/>
+        <ATTRIBUTE NAME="Email Text" VALUE="The daily load completed successfully."/>
+        <ATTRIBUTE NAME="Email User Name" VALUE="team@example.com"/>
       </TASK>
       <TASK NAME="ew_file_arrival" TYPE="Event Wait" DESCRIPTION="Wait for file">
         <ATTRIBUTE NAME="Filewatch name" VALUE="/data/input/orders.dat"/>
@@ -106,9 +110,35 @@ MINI_XML = textwrap.dedent("""\
       <TASK NAME="dec_check_count" TYPE="Decision" DESCRIPTION="Check row count">
         <ATTRIBUTE NAME="Decision Name" VALUE="row_count_gt_0"/>
       </TASK>
+      <WORKLET NAME="wklt_sub_process" DESCRIPTION="Sub-process worklet">
+        <TASKINSTANCE NAME="Start" TASKTYPE="Start" TASKNAME="" ISVALID="YES"/>
+        <TASKINSTANCE NAME="s_sub_orders" TASKTYPE="Session" TASKNAME="m_load_orders" ISVALID="YES"/>
+        <TASKINSTANCE NAME="cmd_sub_script" TASKTYPE="Command" TASKNAME="cmd_sftp_vframe" ISVALID="YES"/>
+        <WORKFLOWLINK FROMTASK="Start" TOTASK="s_sub_orders" CONDITION=""/>
+        <WORKFLOWLINK FROMTASK="s_sub_orders" TOTASK="cmd_sub_script" CONDITION="$s_sub_orders.Status = SUCCEEDED OR DISABLED"/>
+      </WORKLET>
+      <WORKFLOWEVENT NAME="evt_trigger_downstream" TYPE="User Defined" DESCRIPTION="Signal downstream DAG"/>
+      <CONNECTIONREFERENCE CONNECTIONNAME="PROD_DB" CONNECTIONTYPE="Relational" VARIABLE="$Source1" CONNECTIONSUBTYPE="Oracle"/>
+      <CONNECTIONREFERENCE CONNECTIONNAME="TGT_BQ" CONNECTIONTYPE="Relational" VARIABLE="$Target1" CONNECTIONSUBTYPE="BigQuery"/>
+      <TARGETLOADORDER ORDER="1" TARGETINSTANCE="TGT_ORDERS"/>
       <SESSION NAME="s_load_orders" MAPPINGNAME="m_load_orders" DESCRIPTION="">
         <ATTRIBUTE NAME="Parameter Filename" VALUE="param_orders.par"/>
       </SESSION>
+      <WORKFLOW NAME="wkfl_daily_load" DESCRIPTION="Daily load workflow">
+        <SCHEDULER SCHEDULETYPE="DAILY" REPEAT="1" STARTDATE="2024-01-01" STARTTIME="06:00:00"/>
+        <WORKFLOWVARIABLE NAME="$$WF_RUN_DATE" DATATYPE="date/time" DEFAULTVALUE="01/01/2025" DESCRIPTION="Workflow run date" ISNULL="NO" ISPERSISTENT="YES" USERDEFINED="YES"/>
+        <WORKFLOWVARIABLE NAME="$$WF_BATCH_ID" DATATYPE="integer" DEFAULTVALUE="0" DESCRIPTION="Batch identifier" ISNULL="NO"/>
+        <MAPPINGVARIABLE NAME="$$LOAD_TYPE" DATATYPE="string" DEFAULTVALUE="FULL" DESCRIPTION="Load type param" ISPARAM="YES"/>
+        <MAPPINGVARIABLE NAME="$$EXTRACT_DATE" DATATYPE="date/time" DEFAULTVALUE="01/01/2025" DESCRIPTION="Extract date" ISPARAM="YES"/>
+        <TASKINSTANCE NAME="s_load_orders" TASKTYPE="Session" TASKNAME="s_load_orders" ISVALID="YES" REUSABLE="NO" ISENABLED="YES"/>
+        <TASKINSTANCE NAME="wklt_sub_process" TASKTYPE="Worklet" TASKNAME="wklt_sub_process" ISVALID="YES" TREAT_INPUTLINK_AS_AND="YES"/>
+        <TASKINSTANCE NAME="email_success" TASKTYPE="Email" TASKNAME="email_success" ISVALID="YES"/>
+        <TASKINSTANCE NAME="s_disabled_task" TASKTYPE="Session" TASKNAME="s_disabled_task" ISVALID="YES" ISENABLED="NO"/>
+        <WORKFLOWLINK FROMTASK="Start" TOTASK="s_load_orders" CONDITION=""/>
+        <WORKFLOWLINK FROMTASK="s_load_orders" TOTASK="wklt_sub_process" CONDITION="$s_load_orders.Status = SUCCEEDED OR DISABLED"/>
+        <WORKFLOWLINK FROMTASK="wklt_sub_process" TOTASK="email_success" CONDITION=""/>
+        <WORKFLOWLINK FROMTASK="s_load_orders" TOTASK="s_disabled_task" CONDITION="$s_load_orders.Status = FAILED"/>
+      </WORKFLOW>
     </FOLDER>
   </REPOSITORY>
 </POWERMART>
@@ -570,6 +600,491 @@ def test_multi_xml_merge():
     map_names = {m["name"] for m in parsed["mappings"]}
     assert "m_load_orders" in map_names
     assert "m_load_products" in map_names
+
+
+# ═══════════════════════════════════════════════════════════════════
+# V3 Tests: VALUEPAIR, Email, WorkflowEvent, DAG wiring
+# ═══════════════════════════════════════════════════════════════════
+
+def test_valuepair_command_parsing():
+    """Command tasks parsed via VALUEPAIR should have non-empty commands."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    assert "error" not in parsed
+
+    # cmd_sftp_vframe uses VALUEPAIR, should have 2 commands
+    sftp_tasks = [c for c in parsed["command_tasks"] if c["name"] == "cmd_sftp_vframe"]
+    assert len(sftp_tasks) == 1, "cmd_sftp_vframe should be parsed"
+    assert len(sftp_tasks[0]["commands"]) == 2, \
+        f"Expected 2 commands from VALUEPAIR, got {len(sftp_tasks[0]['commands'])}"
+    assert "$PMRootDir" in sftp_tasks[0]["commands"][0]
+
+    # cmd_pre_cleanup uses CmdLine ATTRIBUTE, should also work
+    cleanup = [c for c in parsed["command_tasks"] if c["name"] == "cmd_pre_cleanup"]
+    assert len(cleanup) == 1
+    assert len(cleanup[0]["commands"]) >= 1
+
+
+def test_valuepair_iterparse():
+    """iterparse should also capture VALUEPAIR commands."""
+    agent = _agent()
+    parsed = agent._parse_xml_iterparse(MINI_XML)
+    assert "error" not in parsed
+
+    sftp_tasks = [c for c in parsed["command_tasks"] if c["name"] == "cmd_sftp_vframe"]
+    assert len(sftp_tasks) == 1
+    assert len(sftp_tasks[0]["commands"]) == 2
+
+
+def test_email_task_parsing():
+    """Email tasks should be parsed as dedicated type."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    assert "email_tasks" in parsed
+    assert len(parsed["email_tasks"]) >= 1
+    email = parsed["email_tasks"][0]
+    assert email["name"] == "email_success"
+    assert email["type"] == "EMAIL"
+    assert "Job Complete" in email["subject"]
+    assert "team@example.com" in email["to"]
+
+
+def test_email_task_iterparse():
+    """iterparse should also capture email tasks."""
+    agent = _agent()
+    parsed = agent._parse_xml_iterparse(MINI_XML)
+    assert "email_tasks" in parsed
+    assert len(parsed["email_tasks"]) >= 1
+    assert parsed["email_tasks"][0]["name"] == "email_success"
+
+
+def test_workflow_event_parsing():
+    """WORKFLOWEVENT elements should be parsed."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    assert "workflow_events" in parsed
+    assert len(parsed["workflow_events"]) >= 1
+    evt = parsed["workflow_events"][0]
+    assert evt["name"] == "evt_trigger_downstream"
+
+
+def test_workflow_event_iterparse():
+    """iterparse should also capture WORKFLOWEVENT elements."""
+    agent = _agent()
+    parsed = agent._parse_xml_iterparse(MINI_XML)
+    assert "workflow_events" in parsed
+    assert len(parsed["workflow_events"]) >= 1
+
+
+def test_condition_to_trigger_rule():
+    """Known conditions should map to correct TriggerRules."""
+    rule = InformaticaMigrationAdvancedAgent._condition_to_trigger_rule
+    assert rule("") is None
+    assert rule("$s_load.Status = SUCCEEDED") is None  # Default
+    assert rule("$s_load.Status = SUCCEEDED OR DISABLED") == "TriggerRule.ALL_DONE"
+    assert rule("$s_load.TgtSuccessRows = 1") == "SHORTCIRCUIT"
+    assert rule("$s_load.SrcSuccessRows >= 0") == "SHORTCIRCUIT"
+
+
+def test_workflow_dependencies_real_code():
+    """DAG output should contain real >> operators, not just comments."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    # Create minimal mapping results
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+
+    # Should contain real dependency wiring (>> not preceded by #)
+    dag_lines = dag.split("\n")
+    real_deps = [l for l in dag_lines if ">>" in l and not l.strip().startswith("#")]
+    assert len(real_deps) > 0, "DAG should contain real >> dependency wiring, not just comments"
+
+
+def test_worklet_internal_wiring_real():
+    """TaskGroup code should have actual >> operators for internal deps."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+
+    # Should have a TaskGroup
+    assert "TaskGroup" in dag, "DAG should contain TaskGroup for worklets"
+    # Worklet internal deps should be real code
+    in_taskgroup = False
+    wklt_real_deps = []
+    for line in dag.split("\n"):
+        if "TaskGroup(" in line:
+            in_taskgroup = True
+        if in_taskgroup and ">>" in line and not line.strip().startswith("#"):
+            wklt_real_deps.append(line)
+    assert len(wklt_real_deps) > 0, "Worklet internal deps should be real >> code"
+
+
+def test_no_echo_todo_when_commands_resolved():
+    """BashOperator should use resolved commands, not echo TODO placeholders."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+
+    # cmd_sftp_vframe has VALUEPAIR commands, should NOT have echo TODO
+    # Find BashOperator lines
+    bash_lines = [l for l in dag.split("\n") if "BashOperator" in l or "bash_command" in l]
+    assert len(bash_lines) > 0, "DAG should contain BashOperator"
+
+    # Check that resolved commands appear (not echo TODO for tasks with commands)
+    assert "alv_sftp_vframe" in dag, "Resolved VALUEPAIR command should appear in DAG"
+
+
+def test_dag_has_email_operator():
+    """DAG should contain EmailOperator for email tasks."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+
+    assert "EmailOperator" in dag, "DAG should contain EmailOperator"
+    assert "email_success" in dag.lower(), "Email task should appear in DAG"
+
+
+def test_dag_has_trigger_rule():
+    """DAG should contain TriggerRule.ALL_DONE for SUCCEEDED OR DISABLED links."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+
+    assert "TriggerRule" in dag, "DAG should import and use TriggerRule"
+    assert "TriggerRule.ALL_DONE" in dag, "DAG should contain TriggerRule.ALL_DONE for DISABLED conditions"
+
+
+def test_dag_has_trigger_dagrun():
+    """DAG should contain TriggerDagRunOperator for WorkflowEvents."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+
+    assert "TriggerDagRunOperator" in dag, "DAG should contain TriggerDagRunOperator"
+    assert "evt_trigger_downstream" in dag.lower(), "WorkflowEvent should appear in DAG"
+
+
+def test_dag_has_bash_env_vars():
+    """BashOperator should include env vars for PMRootDir and ETL_HOME."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+
+    assert "pm_root_dir" in dag, "BashOperator should have PMRootDir env var"
+    assert "etl_home" in dag, "BashOperator should have ETL_HOME env var"
+
+
+def test_scorecard_has_operator_counts():
+    """Scorecard should include operator counts and control flow coverage."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    scorecard = agent._calculate_scorecard(parsed, analysis, mr, [], [])
+
+    assert "operator_counts" in scorecard, "Scorecard should include operator counts"
+    counts = scorecard["operator_counts"]
+    assert counts["command_tasks"] >= 2  # cmd_pre_cleanup + cmd_sftp_vframe
+    assert counts["email_tasks"] >= 1
+    assert counts["workflow_events"] >= 1
+    assert counts["worklets"] >= 1
+    assert "control_flow_coverage" in scorecard
+
+
+def test_dependency_graph_carries_conditions():
+    """Dependency graph edges should carry condition metadata."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    graph = agent._build_workflow_dependency_graph(parsed)
+
+    edges = graph["edges"]
+    assert len(edges) > 0, "Should have workflow edges"
+
+    # Check that edges are dicts with condition, not just strings
+    found_condition = False
+    for from_task, edge_list in edges.items():
+        for edge in edge_list:
+            assert isinstance(edge, dict), f"Edge should be dict, got {type(edge)}"
+            assert "to_task" in edge, "Edge should have to_task"
+            assert "condition" in edge, "Edge should have condition"
+            if "DISABLED" in edge.get("condition", "").upper():
+                found_condition = True
+
+    assert found_condition, "Should find at least one DISABLED condition in edges"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# V4 Tests: WORKFLOWVARIABLE, MAPPINGVARIABLE, CONNECTIONREFERENCE,
+#           ISENABLED, AND-gate, TARGETLOADORDER, Normalizer, Rank,
+#           REUSABLE flag, FLATFILE, complex conditions
+# ═══════════════════════════════════════════════════════════════════
+
+def test_workflow_variable_parsing():
+    """WORKFLOWVARIABLE elements should be parsed with defaults and datatypes."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    assert "workflow_variables" in parsed
+    wf_vars = parsed["workflow_variables"]
+    assert len(wf_vars) >= 2, f"Expected >=2 workflow variables, got {len(wf_vars)}"
+    # Check WF_RUN_DATE
+    run_date = [v for v in wf_vars if "RUN_DATE" in v["name"]]
+    assert len(run_date) >= 1, "WF_RUN_DATE should be parsed"
+    assert run_date[0]["datatype"] == "date/time"
+    assert run_date[0]["default_value"] == "01/01/2025"
+    assert run_date[0]["is_persistent"] == "YES"
+    # Check WF_BATCH_ID
+    batch_id = [v for v in wf_vars if "BATCH_ID" in v["name"]]
+    assert len(batch_id) >= 1, "WF_BATCH_ID should be parsed"
+    assert batch_id[0]["datatype"] == "integer"
+
+
+def test_workflow_variable_iterparse():
+    """iterparse should also capture WORKFLOWVARIABLE elements."""
+    agent = _agent()
+    parsed = agent._parse_xml_iterparse(MINI_XML)
+    assert "workflow_variables" in parsed
+    assert len(parsed["workflow_variables"]) >= 2
+
+
+def test_mapping_variable_parsing():
+    """MAPPINGVARIABLE elements should be parsed with ISPARAM flag."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    assert "mapping_variables" in parsed
+    mp_vars = parsed["mapping_variables"]
+    assert len(mp_vars) >= 2, f"Expected >=2 mapping variables, got {len(mp_vars)}"
+    # Check LOAD_TYPE
+    load_type = [v for v in mp_vars if "LOAD_TYPE" in v["name"]]
+    assert len(load_type) >= 1, "LOAD_TYPE should be parsed"
+    assert load_type[0]["is_param"] == "YES"
+    assert load_type[0]["default_value"] == "FULL"
+
+
+def test_mapping_variable_iterparse():
+    """iterparse should also capture MAPPINGVARIABLE elements."""
+    agent = _agent()
+    parsed = agent._parse_xml_iterparse(MINI_XML)
+    assert "mapping_variables" in parsed
+    assert len(parsed["mapping_variables"]) >= 2
+
+
+def test_connection_reference_parsing():
+    """CONNECTIONREFERENCE elements should be parsed."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    assert "connection_references" in parsed
+    conn_refs = parsed["connection_references"]
+    assert len(conn_refs) >= 2, f"Expected >=2 connection references, got {len(conn_refs)}"
+    prod = [c for c in conn_refs if c["name"] == "PROD_DB"]
+    assert len(prod) >= 1, "PROD_DB connection should be parsed"
+    assert prod[0]["type"] == "Relational"
+    assert prod[0]["instance_name"] == "$Source1"
+
+
+def test_connection_reference_iterparse():
+    """iterparse should also capture CONNECTIONREFERENCE elements."""
+    agent = _agent()
+    parsed = agent._parse_xml_iterparse(MINI_XML)
+    assert "connection_references" in parsed
+    assert len(parsed["connection_references"]) >= 2
+
+
+def test_target_load_order_parsing():
+    """TARGETLOADORDER elements should be parsed."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    assert "target_load_orders" in parsed
+    tlo = parsed["target_load_orders"]
+    assert len(tlo) >= 1, f"Expected >=1 target load orders, got {len(tlo)}"
+    assert tlo[0]["target_instance"] == "TGT_ORDERS"
+    assert tlo[0]["order"] == "1"
+
+
+def test_target_load_order_iterparse():
+    """iterparse should also capture TARGETLOADORDER elements."""
+    agent = _agent()
+    parsed = agent._parse_xml_iterparse(MINI_XML)
+    assert "target_load_orders" in parsed
+    assert len(parsed["target_load_orders"]) >= 1
+
+
+def test_isenabled_parsing():
+    """TASKINSTANCE ISENABLED attribute should be captured."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    disabled = [ti for ti in parsed["task_instances"] if ti.get("is_enabled", "YES").upper() == "NO"]
+    assert len(disabled) >= 1, "Should find at least one disabled task instance"
+    assert disabled[0]["name"] == "s_disabled_task"
+
+
+def test_isenabled_iterparse():
+    """iterparse should also capture ISENABLED."""
+    agent = _agent()
+    parsed = agent._parse_xml_iterparse(MINI_XML)
+    disabled = [ti for ti in parsed["task_instances"] if ti.get("is_enabled", "YES").upper() == "NO"]
+    assert len(disabled) >= 1, "iterparse should find disabled task"
+
+
+def test_and_gate_parsing():
+    """TREAT_INPUTLINK_AS_AND attribute should be captured."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    and_gates = [ti for ti in parsed["task_instances"]
+                 if ti.get("treat_input_as_and", "NO").upper() == "YES"]
+    assert len(and_gates) >= 1, "Should find at least one AND-gate task"
+    assert and_gates[0]["name"] == "wklt_sub_process"
+
+
+def test_and_gate_in_dependency_graph():
+    """Dependency graph should track AND-gate tasks."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    graph = agent._build_workflow_dependency_graph(parsed)
+    assert "and_gate_tasks" in graph
+    assert "wklt_sub_process" in graph["and_gate_tasks"]
+
+
+def test_disabled_tasks_in_dependency_graph():
+    """Dependency graph should track disabled tasks."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    graph = agent._build_workflow_dependency_graph(parsed)
+    assert "disabled_tasks" in graph
+    assert "s_disabled_task" in graph["disabled_tasks"]
+
+
+def test_disabled_task_in_dag():
+    """DAG should contain DummyOperator for disabled tasks."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+    assert "Disabled" in dag or "disabled" in dag.lower(), "DAG should mention disabled tasks"
+    assert "s_disabled_task" in dag.lower(), "Disabled task should appear in DAG"
+
+
+def test_complex_condition_trigger_rules():
+    """Complex conditions should map to appropriate TriggerRules."""
+    rule = InformaticaMigrationAdvancedAgent._condition_to_trigger_rule
+    # FAILED condition → ALL_FAILED
+    assert rule("$task.Status = FAILED") == "TriggerRule.ALL_FAILED"
+    # SUCCEEDED OR STOPPED → ALL_DONE
+    assert rule("$task.Status = SUCCEEDED OR STOPPED") == "TriggerRule.ALL_DONE"
+    # Simple SUCCEEDED → None (default)
+    assert rule("$task.Status = SUCCEEDED") is None
+
+
+def test_parameters_enriched_from_variables():
+    """_extract_parameters should use WORKFLOWVARIABLE and MAPPINGVARIABLE data."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    params = agent._extract_parameters(parsed)
+    # Should include WF_RUN_DATE from WORKFLOWVARIABLE
+    wf_params = [p for p in params if "RUN_DATE" in p["name"]]
+    assert len(wf_params) >= 1, "WF_RUN_DATE should be in parameters"
+    assert wf_params[0]["default_value"] == "01/01/2025"
+    assert wf_params[0]["type_guess"] == "date"
+    assert wf_params[0]["source"] == "workflow_variable"
+
+    # Should include LOAD_TYPE from MAPPINGVARIABLE
+    mp_params = [p for p in params if "LOAD_TYPE" in p["name"]]
+    assert len(mp_params) >= 1, "LOAD_TYPE should be in parameters"
+    assert mp_params[0]["default_value"] == "FULL"
+    assert mp_params[0]["source"] == "mapping_variable"
+
+
+def test_connection_map_building():
+    """_build_connection_map should build instance→connection mapping."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    conn_map = agent._build_connection_map(parsed)
+    assert len(conn_map) >= 2
+    assert "$Source1" in conn_map
+    assert conn_map["$Source1"]["connection_name"] == "PROD_DB"
+
+
+def test_reusable_flag_on_transformations():
+    """Transformations should have reusable flag."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    for tf in parsed["transformations"]:
+        assert "reusable" in tf, f"Transformation {tf['name']} should have reusable flag"
+
+
+def test_scorecard_has_new_counts():
+    """Scorecard should include new operator counts for variables and references."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    scorecard = agent._calculate_scorecard(parsed, analysis, mr, [], [])
+    counts = scorecard["operator_counts"]
+    assert "workflow_variables" in counts
+    assert "mapping_variables" in counts
+    assert "connection_references" in counts
+    assert "target_load_orders" in counts
+    assert counts["workflow_variables"] >= 2
+    assert counts["mapping_variables"] >= 2
+    assert counts["connection_references"] >= 2
+
+
+def test_failed_condition_trigger_rule_in_dag():
+    """DAG should contain TriggerRule.ALL_FAILED for FAILED conditions."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
+                 "unsupported": [], "sql_convertible": 0, "has_complex_logic": False,
+                 "transformation_summary": []}
+    mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
+    dag = agent._generate_airflow_dag(parsed, analysis, mr)
+    assert "TriggerRule.ALL_FAILED" in dag, \
+        "DAG should contain TriggerRule.ALL_FAILED for FAILED condition links"
+
+
+def test_iterparse_new_keys_parity():
+    """iterparse should produce same counts for all new keys as standard parser."""
+    agent = _agent()
+    standard = agent._parse_xml(MINI_XML)
+    chunked = agent._parse_xml_iterparse(MINI_XML)
+
+    for key in ["workflow_variables", "mapping_variables",
+                "connection_references", "target_load_orders"]:
+        assert len(standard.get(key, [])) == len(chunked.get(key, [])), \
+            f"Mismatch on '{key}': standard={len(standard.get(key, []))}, iterparse={len(chunked.get(key, []))}"
 
 
 # ═══════════════════════════════════════════════════════════════════

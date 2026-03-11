@@ -101,9 +101,77 @@ def test_full_migration():
     assert sql_len > 10000, f"Expected substantial SQL, got {sql_len} chars"
 
     # Verify DAG is non-trivial
-    dag_len = len(result["airflow_dag"])
+    dag = result["airflow_dag"]
+    dag_len = len(dag)
     print(f"  Airflow DAG length: {dag_len:,} chars")
     assert dag_len > 5000, f"Expected substantial DAG, got {dag_len} chars"
+
+    # V3: Verify DAG contains BashOperator (not 0)
+    bash_count = dag.count("BashOperator(")
+    print(f"  BashOperator count: {bash_count}")
+    assert bash_count >= 30, f"Expected >= 30 BashOperator, got {bash_count}"
+
+    # V3: Verify DAG contains real >> dependency wiring (not just comments)
+    dag_lines = dag.split("\n")
+    real_deps = [l for l in dag_lines if ">>" in l and not l.strip().startswith("#")]
+    print(f"  Real >> dependency lines: {len(real_deps)}")
+    assert len(real_deps) >= 20, f"Expected >= 20 real dependency lines, got {len(real_deps)}"
+
+    # V3: Verify TaskGroup for worklets
+    taskgroup_count = dag.count("TaskGroup(")
+    print(f"  TaskGroup count: {taskgroup_count}")
+    assert taskgroup_count >= 20, f"Expected >= 20 TaskGroup, got {taskgroup_count}"
+
+    # V3: Verify no echo TODO for commands with VALUEPAIR data
+    echo_todo_count = dag.count("echo TODO") + dag.count("echo 'TODO")
+    print(f"  echo TODO placeholders: {echo_todo_count}")
+    # Some commands may not have VALUEPAIR data, but most should be resolved
+    assert echo_todo_count < bash_count, \
+        f"Too many echo TODO placeholders ({echo_todo_count}) vs BashOperators ({bash_count})"
+
+    # V3: Verify BashOperator env vars
+    assert "pm_root_dir" in dag, "BashOperator should have PMRootDir env var"
+
+    # V3: Verify TriggerRule usage
+    assert "TriggerRule" in dag, "DAG should contain TriggerRule"
+
+    # V3: Verify new imports
+    assert "EmailOperator" in dag or "TriggerDagRunOperator" in dag, \
+        "DAG should import EmailOperator or TriggerDagRunOperator"
+
+    # V3: Verify scorecard has operator counts
+    sc = result["scorecard"]
+    assert "operator_counts" in sc, "Scorecard should include operator_counts"
+    print(f"  Operator counts: {sc['operator_counts']}")
+
+    # V4: Verify new parsed element counts in scorecard
+    oc = sc["operator_counts"]
+    if oc.get("workflow_variables", 0) > 0:
+        print(f"  Workflow variables: {oc['workflow_variables']}")
+    if oc.get("mapping_variables", 0) > 0:
+        print(f"  Mapping variables: {oc['mapping_variables']}")
+    if oc.get("connection_references", 0) > 0:
+        print(f"  Connection references: {oc['connection_references']}")
+
+    # V4: Verify parameters enriched from WORKFLOWVARIABLE/MAPPINGVARIABLE
+    params = result.get("parameters", [])
+    print(f"  Parameters extracted: {len(params)}")
+    wf_sourced = [p for p in params if p.get("source") == "workflow_variable"]
+    mv_sourced = [p for p in params if p.get("source") == "mapping_variable"]
+    if wf_sourced:
+        print(f"    From WORKFLOWVARIABLE: {len(wf_sourced)}")
+    if mv_sourced:
+        print(f"    From MAPPINGVARIABLE: {len(mv_sourced)}")
+
+    # V4: Verify ISENABLED handling (disabled tasks as DummyOperator)
+    disabled_in_dag = dag.count("Disabled in source workflow")
+    if disabled_in_dag > 0:
+        print(f"  Disabled tasks in DAG: {disabled_in_dag}")
+
+    # V4: Verify AND-gate/TriggerRule.ALL_SUCCESS if applicable
+    all_success_count = dag.count("TriggerRule.ALL_SUCCESS")
+    if all_success_count > 0:
+        print(f"  AND-gate (TriggerRule.ALL_SUCCESS): {all_success_count}")
 
     print("  ✓ Full migration integration test PASSED")
 
@@ -127,7 +195,10 @@ def test_iterparse_vs_standard_alv100():
 
     print(f"  Standard parser: {t_std:.2f}s | iterparse: {t_itp:.2f}s")
 
-    for key in ["sources", "targets", "mappings", "workflows", "sessions"]:
+    for key in ["sources", "targets", "mappings", "workflows", "sessions",
+                 "command_tasks", "email_tasks", "workflow_events",
+                 "workflow_variables", "mapping_variables",
+                 "connection_references", "target_load_orders"]:
         std_count = len(std.get(key, []))
         itp_count = len(itp.get(key, []))
         print(f"  {key}: standard={std_count}, iterparse={itp_count}")
