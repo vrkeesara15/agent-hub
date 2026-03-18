@@ -788,7 +788,7 @@ def test_dag_has_trigger_dagrun():
 
 
 def test_dag_has_bash_env_vars():
-    """BashOperator should include env vars for PMRootDir and ETL_HOME."""
+    """Command tasks with .ksh scripts should generate PythonOperator stubs with migration guidance."""
     agent = _agent()
     parsed = agent._parse_xml(MINI_XML)
     analysis = {"complexity": "medium", "has_scd_pattern": False, "needs_dataflow": 0,
@@ -797,8 +797,9 @@ def test_dag_has_bash_env_vars():
     mr = [{"mapping_name": "m_load_orders", "status": "converted", "sql": "SELECT 1"}]
     dag = agent._generate_airflow_dag(parsed, analysis, mr)
 
-    assert "pm_root_dir" in dag, "BashOperator should have PMRootDir env var"
-    assert "etl_home" in dag, "BashOperator should have ETL_HOME env var"
+    # .ksh commands should now be PythonOperator with migration guidance (Fix #6)
+    assert "PythonOperator" in dag, "ksh commands should use PythonOperator stubs"
+    assert "MIGRATE_TO_GCP" in dag, "ksh commands should have MIGRATE_TO_GCP guidance"
 
 
 def test_scorecard_has_operator_counts():
