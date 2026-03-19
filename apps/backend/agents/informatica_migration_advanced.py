@@ -413,6 +413,42 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 if k in selected_mappings
             }
 
+        # Gap 14: Skip disabled sessions — build set of disabled mapping names
+        disabled_mapping_names = set()
+        session_to_mapping_name = {s["name"]: s.get("mapping_name", "") for s in parsed.get("sessions", [])}
+        for ti in parsed.get("task_instances", []):
+            if ti.get("is_enabled", "YES").upper() == "NO" and ti.get("type", "").upper() == "SESSION":
+                task_name = ti.get("task_name", ti.get("name", ""))
+                mapping_name_for_disabled = session_to_mapping_name.get(task_name, "")
+                if mapping_name_for_disabled:
+                    disabled_mapping_names.add(mapping_name_for_disabled)
+        # Also check worklet tasks for disabled sessions
+        for wklt in parsed.get("worklets", []):
+            for task in wklt.get("tasks", []):
+                if task.get("is_enabled", "YES").upper() == "NO" and task.get("type", "").upper() == "SESSION":
+                    task_name = task.get("task_name", task.get("name", ""))
+                    mapping_name_for_disabled = session_to_mapping_name.get(task_name, "")
+                    if mapping_name_for_disabled:
+                        disabled_mapping_names.add(mapping_name_for_disabled)
+
+        if disabled_mapping_names:
+            logger.info("Skipping SQL generation for %d disabled mappings: %s",
+                        len(disabled_mapping_names), ", ".join(sorted(disabled_mapping_names)[:10]))
+
+        # Remove disabled mappings from processing (still track them in results)
+        disabled_results = []
+        for dm_name in disabled_mapping_names:
+            if dm_name in mapping_groups:
+                disabled_results.append({
+                    "mapping_name": dm_name,
+                    "status": "disabled",
+                    "sql": "",
+                    "expression_comparisons": [],
+                    "transformation_count": 0,
+                    "issues": ["Session disabled in source workflow (ISENABLED=NO)"],
+                })
+                del mapping_groups[dm_name]
+
         # Merge parameter overrides from .par file and/or explicit overrides
         if parameter_file_content:
             par_values = self._parse_parameter_file(parameter_file_content)
@@ -523,6 +559,8 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             if r.get("sql"):
                 all_sql_parts.append(f"-- ========== Mapping: {r['mapping_name']} ==========\n{r['sql']}")
             expression_comparisons.extend(r.get("expression_comparisons", []))
+
+        mapping_results.extend(disabled_results)
 
         # Step 7: Combine results
         combined_sql = "\n\n".join(all_sql_parts) if all_sql_parts else "-- No SQL generated"
@@ -824,6 +862,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     "type": inst_type,
                     "transformation_name": tf_name,
                     "transformation_type": inst.get("TRANSFORMATION_TYPE", ""),
+                    "associated_source_instance": inst.get("ASSOCIATED_SOURCE_INSTANCE", ""),
                 }
                 mp["instances"].append(inst_record)
                 if inst_type == "SOURCE" and tf_name:
@@ -1097,11 +1136,14 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 "description": session.get("DESCRIPTION", ""),
                 "transformation_overrides": {},
                 "parameter_filename": "",
+                "treat_source_rows_as": "Insert",
             }
             # Session-level attributes
             for attr in session.iter("ATTRIBUTE"):
                 if attr.get("NAME", "") == "Parameter Filename":
                     sess["parameter_filename"] = attr.get("VALUE", "")
+                elif attr.get("NAME", "") == "Treat source rows as":
+                    sess["treat_source_rows_as"] = attr.get("VALUE", "Insert")
 
             # SESSTRANSFORMATIONINST overrides
             for sti in session.iter("SESSTRANSFORMATIONINST"):
@@ -1111,7 +1153,8 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     ta_name = tattr.get("NAME", "")
                     ta_value = tattr.get("VALUE", "")
                     if ta_name in ("Pre SQL", "Post SQL", "Sql Query", "Source Filter",
-                                   "Table Name Prefix", "Target Table Name", "Owner Name"):
+                                   "Table Name Prefix", "Target Table Name", "Owner Name",
+                                   "Treat source rows as"):
                         # Decode XML-encoded newlines
                         ta_value = (ta_value.replace("&#xD;&#xA;", "\n")
                                     .replace("&#xA;", "\n").replace("&#xD;", "\n"))
@@ -1276,6 +1319,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                             "description": elem.get("DESCRIPTION", ""),
                             "transformation_overrides": {},
                             "parameter_filename": "",
+                            "treat_source_rows_as": "Insert",
                         }
                 continue
 
@@ -1367,6 +1411,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     "type": inst_type,
                     "transformation_name": tf_name,
                     "transformation_type": elem.get("TRANSFORMATION_TYPE", ""),
+                    "associated_source_instance": elem.get("ASSOCIATED_SOURCE_INSTANCE", ""),
                 }
                 _current_mapping["instances"].append(inst_record)
                 if inst_type == "SOURCE" and tf_name:
@@ -1577,7 +1622,8 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     ta_name = tattr.get("NAME", "")
                     ta_value = tattr.get("VALUE", "")
                     if ta_name in ("Pre SQL", "Post SQL", "Sql Query", "Source Filter",
-                                   "Table Name Prefix", "Target Table Name", "Owner Name"):
+                                   "Table Name Prefix", "Target Table Name", "Owner Name",
+                                   "Treat source rows as"):
                         ta_value = (ta_value.replace("&#xD;&#xA;", "\n")
                                     .replace("&#xA;", "\n").replace("&#xD;", "\n"))
                         overrides[ta_name] = ta_value
@@ -1588,6 +1634,8 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             elif tag == "ATTRIBUTE" and _current_session and _session_depth == 1:
                 if elem.get("NAME", "") == "Parameter Filename":
                     _current_session["parameter_filename"] = elem.get("VALUE", "")
+                elif elem.get("NAME", "") == "Treat source rows as":
+                    _current_session["treat_source_rows_as"] = elem.get("VALUE", "Insert")
                 # Don't clear — parent element may still need child attrs
 
             # ── Container close events ──
@@ -2099,6 +2147,10 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     "connector_graph": mp_connector_graph,
                     "mapplet_instance_names": mp.get("mapplet_instance_names", []),
                     "instances": mp.get("instances", []),
+                    "target_load_orders": [
+                        tlo for tlo in parsed.get("target_load_orders", [])
+                        if tlo.get("target_instance", "") in mp.get("target_instance_names", [])
+                    ],
                 }
         else:
             # No explicit mappings: treat all transformations as one group
@@ -2373,11 +2425,11 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "used_llm": False,
         }
 
-    def _sync_llm_call(self, system: str, prompt: str) -> str:
+    def _sync_llm_call(self, system: str, prompt: str, max_tokens: int = 4096) -> str:
         """Synchronous LLM call to run in a thread pool."""
         api_response = self.llm.client.messages.create(
             model=self.llm.model,
-            max_tokens=4096,
+            max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -2388,39 +2440,60 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         connector_graph: dict, parameters: list,
     ) -> Optional[str]:
         """Use LLM to convert a single mapping to BigQuery SQL."""
-        try:
-            summary = self._build_mapping_summary(mapping_name, group, connector_graph, parameters)
+        summary = self._build_mapping_summary(mapping_name, group, connector_graph, parameters)
 
-            prompt = (
-                f"Convert this single Informatica mapping to BigQuery SQL.\n\n"
-                f"**Mapping: {mapping_name}**\n"
-                f"{group.get('description', '')}\n\n"
-                f"{summary}\n\n"
-                f"Generate ONLY the BigQuery SQL for this mapping.\n"
-                f"Replace any $$parameter references with @param_name.\n"
-                f"Convert ALL Informatica expressions to BigQuery SQL syntax.\n\n"
-                f"Respond with valid JSON:\n"
-                f'{{"sql": "-- Complete BigQuery SQL for mapping {mapping_name}"}}'
-            )
+        prompt = (
+            f"Convert this single Informatica mapping to BigQuery SQL.\n\n"
+            f"**Mapping: {mapping_name}**\n"
+            f"{group.get('description', '')}\n\n"
+            f"{summary}\n\n"
+            f"Generate ONLY the BigQuery SQL for this mapping.\n"
+            f"Replace any $$parameter references with @param_name.\n"
+            f"Convert ALL Informatica expressions to BigQuery SQL syntax.\n\n"
+            f"Respond with valid JSON:\n"
+            f'{{"sql": "-- Complete BigQuery SQL for mapping {mapping_name}"}}'
+        )
 
-            # Run sync Anthropic SDK call in thread pool to avoid blocking event loop
-            text = await asyncio.wait_for(
-                asyncio.to_thread(self._sync_llm_call, self.system_prompt, prompt),
-                timeout=45,  # 45s per mapping — must fit within Railway's 120s total
-            )
-            if text.startswith("```"):
-                lines = text.split("\n")
-                lines = [ln for ln in lines if not ln.strip().startswith("```")]
-                text = "\n".join(lines)
+        # Gap 15: Dynamic max_tokens based on mapping complexity
+        tf_count = len(group.get("transformations", []))
+        if tf_count <= 5:
+            max_tokens = 4096
+        elif tf_count <= 15:
+            max_tokens = 8192
+        else:
+            max_tokens = 16384
 
-            result = json.loads(text)
-            return result.get("sql", "")
-        except asyncio.TimeoutError:
-            logger.warning("LLM mapping conversion timed out for %s", mapping_name)
-            return None
-        except Exception as exc:
-            logger.warning("LLM mapping conversion failed for %s: %s", mapping_name, exc)
-            return None
+        # Gap 16: Retry with exponential backoff
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                text = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._sync_llm_call, self.system_prompt, prompt, max_tokens
+                    ),
+                    timeout=45,
+                )
+                if text.startswith("```"):
+                    lines = text.split("\n")
+                    lines = [ln for ln in lines if not ln.strip().startswith("```")]
+                    text = "\n".join(lines)
+
+                result = json.loads(text)
+                return result.get("sql", "")
+            except asyncio.TimeoutError:
+                if attempt < max_retries:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                    continue
+                logger.warning("LLM mapping conversion timed out after %d retries for %s",
+                               max_retries, mapping_name)
+                return None
+            except Exception as exc:
+                if attempt < max_retries:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                    continue
+                logger.warning("LLM mapping conversion failed after %d retries for %s: %s",
+                               max_retries, mapping_name, exc)
+                return None
 
     async def _llm_convert_expressions_batch(
         self, expressions: list[dict],
@@ -2649,13 +2722,17 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 return mplt
         return None
 
-    def _inline_mapplets(self, group: dict, parsed: dict) -> list:
+    def _inline_mapplets(self, group: dict, parsed: dict, _depth: int = 0) -> list:
         """Inline mapplet transformations into the mapping's transformation list.
 
         For each mapplet instance referenced in the mapping, find the mapplet
         definition and add its transformations (Expression, Lookup, Aggregator,
         etc.) to the mapping's pipeline with prefixed names.
+        Recursively resolves nested mapplets up to depth 5.
         """
+        if _depth > 5:
+            return list(group.get("transformations", []))
+
         transformations = list(group.get("transformations", []))
         mapplet_names = group.get("mapplet_instance_names", [])
         if not mapplet_names:
@@ -2664,20 +2741,151 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 if inst.get("transformation_type") == "Mapplet" or inst.get("type") == "MAPPLET":
                     mapplet_names.append(inst.get("transformation_name", ""))
 
+        connector_graph = group.get("connector_graph", {})
         for mplt_name in mapplet_names:
             mplt = self._get_mapplet_by_name(parsed, mplt_name)
             if not mplt:
                 continue
+
+            # Check if this mapplet contains nested mapplets
+            nested_mapplet_names = []
             for tf in mplt.get("transformations", []):
-                # Skip Input/Output Transformation wrappers, inline the real logic
                 if tf["type"] in ("Input Transformation", "Output Transformation"):
                     continue
                 inlined = dict(tf)
                 inlined["name"] = f"{mplt_name}__{tf['name']}"
                 inlined["_from_mapplet"] = mplt_name
+
+                # Detect nested mapplet references
+                if tf["type"] == "Mapplet":
+                    nested_mapplet_names.append(tf.get("name", ""))
+
                 transformations.append(inlined)
 
+            # Merge mapplet's internal connectors into parent connector graph
+            forward = connector_graph.get("forward_edges", {})
+            reverse = connector_graph.get("reverse_edges", {})
+            for conn in mplt.get("connectors", []):
+                from_inst = f"{mplt_name}__{conn['from_instance']}"
+                to_inst = f"{mplt_name}__{conn['to_instance']}"
+                if from_inst not in forward:
+                    forward[from_inst] = set()
+                forward[from_inst].add(to_inst)
+                if to_inst not in reverse:
+                    reverse[to_inst] = set()
+                reverse[to_inst].add(from_inst)
+
+            # Recursively resolve nested mapplets
+            if nested_mapplet_names and _depth < 5:
+                nested_group = {
+                    "transformations": transformations,
+                    "mapplet_instance_names": [f"{mplt_name}__{n}" for n in nested_mapplet_names],
+                    "instances": group.get("instances", []),
+                    "connector_graph": connector_graph,
+                }
+                transformations = self._inline_mapplets(nested_group, parsed, _depth + 1)
+
         return transformations
+
+    def _resolve_associated_sources(self, sq_instance_name: str, group: dict) -> list[str]:
+        """Return source table names whose instances are associated with a Source Qualifier."""
+        associated = []
+        for inst in group.get("instances", []):
+            if inst.get("associated_source_instance", "") == sq_instance_name:
+                associated.append(inst.get("transformation_name", inst.get("name", "")))
+        return associated
+
+    def _parse_update_strategy_expression(self, expr: str, parameters: list | None = None) -> dict:
+        """Parse an Update Strategy expression to extract DD flag conditions.
+
+        Informatica Update Strategy expressions use DD_INSERT (0), DD_UPDATE (1),
+        DD_DELETE (2), DD_REJECT (3) constants in IIF/DECODE expressions.
+
+        Returns: {"DD_INSERT": "sql_condition", "DD_UPDATE": "sql_condition",
+                  "DD_DELETE": "sql_condition", "DD_REJECT": "sql_condition"}
+        """
+        result = {}
+        expr_upper = expr.upper().strip()
+
+        # Map DD constants to their names
+        dd_map = {"DD_INSERT": "0", "DD_UPDATE": "1", "DD_DELETE": "2", "DD_REJECT": "3"}
+
+        # Try to extract conditions from IIF patterns
+        # Pattern: IIF(condition, DD_INSERT, IIF(condition2, DD_UPDATE, DD_DELETE))
+        for flag_name in ("DD_INSERT", "DD_UPDATE", "DD_DELETE", "DD_REJECT"):
+            if flag_name in expr_upper:
+                # Find the condition leading to this flag in IIF pattern
+                # IIF(cond, DD_INSERT, ...) → DD_INSERT when cond is TRUE
+                pattern = re.compile(
+                    rf'IIF\s*\((.+?),\s*{flag_name}\b',
+                    re.IGNORECASE | re.DOTALL
+                )
+                match = pattern.search(expr)
+                if match:
+                    cond = match.group(1).strip()
+                    # Convert the condition to BigQuery SQL
+                    result[flag_name] = self._convert_expression(cond, parameters)
+                else:
+                    # Check if it's the default/else value: ..., DD_INSERT)
+                    # This means it's the fallback — condition is "everything else"
+                    if re.search(rf',\s*{flag_name}\s*\)', expr, re.IGNORECASE):
+                        result[flag_name] = "TRUE /* default branch */"
+
+        return result
+
+    def _resolve_joiner_master_detail(
+        self, tf: dict, join_sources: list, connector_graph: dict
+    ) -> tuple[str, str]:
+        """Resolve which join source is Master vs Detail for Joiner transformation.
+
+        In Informatica, Master Outer Join preserves Detail rows (Detail is outer side).
+        Returns (detail_source, master_source) for correct LEFT JOIN orientation.
+        """
+        if len(join_sources) < 2:
+            return (join_sources[0] if join_sources else "unknown", "unknown")
+
+        # Check field PORTTYPE for MASTER/DETAIL designations
+        master_fields = set()
+        detail_fields = set()
+        for field in tf.get("fields", []):
+            porttype = field.get("porttype", "").upper()
+            field_name = field.get("name", "")
+            if "MASTER" in porttype:
+                master_fields.add(field_name)
+            elif "DETAIL" in porttype:
+                detail_fields.add(field_name)
+
+        if not master_fields and not detail_fields:
+            # Can't determine — return positional default
+            return (join_sources[0], join_sources[1])
+
+        # Use connector graph to trace which source feeds master vs detail ports
+        reverse = connector_graph.get("reverse_edges", {})
+        forward = connector_graph.get("forward_edges", {})
+
+        # Check which source connects to fields marked as MASTER
+        master_source = None
+        detail_source = None
+        for src in join_sources:
+            # Get fields connected from this source to the joiner
+            fields_from_src = set()
+            field_map = connector_graph.get("field_map", {})
+            for (fi, ff), (ti, tf_field) in field_map.items():
+                if fi == src and ti == tf["name"]:
+                    fields_from_src.add(tf_field)
+
+            if fields_from_src & master_fields:
+                master_source = src
+            if fields_from_src & detail_fields:
+                detail_source = src
+
+        # Fallback to positional if we can't determine
+        if not detail_source:
+            detail_source = join_sources[0]
+        if not master_source:
+            master_source = join_sources[1] if join_sources[1] != detail_source else join_sources[0]
+
+        return (detail_source, master_source)
 
     # ── Column Lineage Tracking ──────────────────────────────────
 
@@ -3053,7 +3261,23 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                         f"1=1 /* REVIEW: define filter condition for router group '{gn}' — "
                         f"check original Informatica mapping for group filter */"))
 
-        return groups
+        # Collect fields per group from TRANSFORMFIELD GROUP attribute
+        group_fields_map = {}
+        for field in tf.get("fields", []):
+            grp = field.get("group", "").strip()
+            if grp:
+                if grp not in group_fields_map:
+                    group_fields_map[grp] = []
+                # Only include OUTPUT ports in the group's field list
+                if "OUTPUT" in field.get("porttype", "").upper():
+                    group_fields_map[grp].append(field["name"])
+
+        # Convert to 3-tuples: (name, condition, fields)
+        result_with_fields = []
+        for gn, gc in groups:
+            fields_for_group = group_fields_map.get(gn, [])
+            result_with_fields.append((gn, gc, fields_for_group))
+        return result_with_fields
 
     # ── Variable Port Resolution ─────────────────────────────────
 
@@ -3300,7 +3524,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             pre_sql = ovr.get("Pre SQL", "").strip()
             if pre_sql:
                 lines.append(f"-- Pre-SQL from session (instance: {inst_name})")
-                lines.append(self._convert_expression(pre_sql, parameters))
+                lines.append(self._convert_teradata_sql(pre_sql, parameters))
                 lines.append(";")
                 lines.append("")
 
@@ -3469,7 +3693,9 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 join_type = tf.get("properties", {}).get("Join Type", "Normal Join")
                 bq_join = ("INNER JOIN" if "Normal" in join_type
                            else "LEFT OUTER JOIN" if "Master" in join_type
-                           else "FULL OUTER JOIN")
+                           else "FULL OUTER JOIN" if "Full" in join_type
+                           else "LEFT OUTER JOIN" if "Detail" in join_type
+                           else "INNER JOIN")
                 join_cond = tf.get("properties", {}).get("Join Condition", "a.id = b.id")
                 join_cond = self._convert_expression(join_cond, parameters)
 
@@ -3477,11 +3703,15 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 reverse = connector_graph.get("reverse_edges", {})
                 join_sources = list(reverse.get(tf["name"], set()))
 
+                # Gap 5: Resolve Master/Detail orientation
                 table_name = f"joined_{re.sub(r'[^a-zA-Z0-9_]', '_', tf['name'].lower())}"
                 lines.append(f"{naming.create_stmt()} {naming.format_table('', table_name)} AS")
                 if len(join_sources) >= 2:
-                    lines.append(f"SELECT * FROM {naming.format_table('', join_sources[0].lower())}")
-                    lines.append(f"{bq_join} {naming.format_table('', join_sources[1].lower())}")
+                    detail_src, master_src = self._resolve_joiner_master_detail(
+                        tf, join_sources, connector_graph
+                    )
+                    lines.append(f"SELECT * FROM {naming.format_table('', detail_src.lower())}  -- Detail (preserved)")
+                    lines.append(f"{bq_join} {naming.format_table('', master_src.lower())}  -- Master")
                 else:
                     lines.append(f"SELECT * FROM {naming.format_table('', prev_table)}")
                     lines.append(f"{bq_join} lookup_table")
@@ -3515,7 +3745,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
                 # Resolve the lookup table/subquery for LEFT JOIN
                 if lookup_sql_override:
-                    converted_sql = self._convert_expression(lookup_sql_override, parameters)
+                    converted_sql = self._convert_teradata_sql(lookup_sql_override, parameters)
                     # Validate: don't emit broken LEFT JOIN (SELECT) with empty subquery
                     if converted_sql and converted_sql.strip() not in ("SELECT", "(SELECT)", ""):
                         lines.append(f"LEFT JOIN ({converted_sql}) {lkp_alias}")
@@ -3571,12 +3801,18 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
                 if router_groups:
                     # Generate a CREATE TABLE per router output group
-                    for grp_name, grp_condition in router_groups:
+                    for grp_tuple in router_groups:
+                        grp_name = grp_tuple[0]
+                        grp_condition = grp_tuple[1]
+                        grp_fields = grp_tuple[2] if len(grp_tuple) > 2 else []
                         grp_table = f"routed_{re.sub(r'[^a-zA-Z0-9_]', '_', tf['name'].lower())}_{grp_name.lower()}"
                         group_table_names[grp_name.lower()] = grp_table
                         lines.append(f"-- Router group: {grp_name}")
                         lines.append(f"{naming.create_stmt()} {naming.format_table('', grp_table)} AS")
-                        lines.append(f"SELECT *")
+                        if grp_fields:
+                            lines.append(f"SELECT {', '.join(grp_fields)}")
+                        else:
+                            lines.append(f"SELECT *")
                         lines.append(f"FROM {naming.format_table('', prev_table)}")
                         if "TODO" not in grp_condition and grp_condition.strip():
                             lines.append(f"WHERE {grp_condition}")
@@ -3589,7 +3825,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     if len(router_groups) > 0:
                         default_table = f"routed_{re.sub(r'[^a-zA-Z0-9_]', '_', tf['name'].lower())}_default"
                         group_table_names["default"] = default_table
-                        all_conditions = [c for _, c in router_groups if "TODO" not in c]
+                        all_conditions = [c for c in [t[1] for t in router_groups] if "TODO" not in c]
                         if all_conditions:
                             negated = " AND ".join(f"NOT ({c})" for c in all_conditions)
                             lines.append(f"-- Router group: DEFAULT (unmatched records)")
@@ -3645,23 +3881,32 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 step += 1
 
             elif tf_type == "Sequence Generator":
-                # Extract start value and increment from properties
+                # Gap 6: Read sequence properties
                 props = tf.get("properties", {})
                 start_val = int(props.get("Start Value", "1") or "1")
                 increment = int(props.get("Increment By", "1") or "1")
-                seq_col = "sequence_id"
+
+                nextval_col = "sequence_id"
+                currval_col = None
                 for field in tf.get("fields", []):
-                    if "NEXTVAL" in field.get("name", "").upper() or "OUTPUT" in field.get("porttype", "").upper():
-                        seq_col = field["name"]
-                        break
+                    fname = field.get("name", "").upper()
+                    if "NEXTVAL" in fname or ("OUTPUT" in field.get("porttype", "").upper() and not currval_col):
+                        nextval_col = field["name"]
+                    elif "CURRVAL" in fname:
+                        currval_col = field["name"]
+
                 lines.append(f"-- Step {step}: {tf['name']} (Sequence → ROW_NUMBER, start={start_val}, increment={increment})")
                 table_name = f"seq_{re.sub(r'[^a-zA-Z0-9_]', '_', tf['name'].lower())}"
                 if start_val == 1 and increment == 1:
-                    seq_expr = f"ROW_NUMBER() OVER (ORDER BY 1)"
+                    seq_expr = "ROW_NUMBER() OVER (ORDER BY 1)"
                 else:
                     seq_expr = f"({start_val} + (ROW_NUMBER() OVER (ORDER BY 1) - 1) * {increment})"
+
                 lines.append(f"{naming.create_stmt()} {naming.format_table('', table_name)} AS")
-                lines.append(f"SELECT *, {seq_expr} AS {seq_col}")
+                select_parts = ["*", f"{seq_expr} AS {nextval_col}"]
+                if currval_col:
+                    select_parts.append(f"{seq_expr} AS {currval_col}  -- CURRVAL (same as NEXTVAL)")
+                lines.append(f"SELECT {', '.join(select_parts)}")
                 lines.append(f"FROM {naming.format_table('', prev_table)}")
                 lines.append(";")
                 lines.append("")
@@ -3817,15 +4062,19 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
             elif tf_type == "Update Strategy":
                 lines.append(f"-- Step {step}: {tf['name']} (Update Strategy)")
-                # Parse and document the DML mode from the expression
-                us_expr = ""
+                # Parse DD expression to extract conditions for each flag
+                dd_expr = ""
                 for field in tf.get("fields", []):
                     expr = field.get("expression", "")
-                    if expr:
-                        us_expr = expr
+                    if expr and any(dd in expr.upper() for dd in ("DD_INSERT", "DD_UPDATE", "DD_DELETE", "DD_REJECT")):
+                        dd_expr = expr
                         break
-                if us_expr:
-                    us_upper = us_expr.upper()
+                    elif expr and not dd_expr:
+                        dd_expr = expr  # fallback: use first expression found
+                if dd_expr:
+                    dd_conditions = self._parse_update_strategy_expression(dd_expr, parameters)
+                    # Document DML modes
+                    us_upper = dd_expr.upper()
                     modes = []
                     if "DD_INSERT" in us_upper:
                         modes.append("INSERT")
@@ -3836,10 +4085,17 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     if "DD_REJECT" in us_upper:
                         modes.append("REJECT (skip)")
                     lines.append(f"-- DML modes: {', '.join(modes) if modes else 'INSERT (default)'}")
-                    converted_us = self._convert_expression(us_expr, parameters)
+                    converted_us = self._convert_expression(dd_expr, parameters)
                     lines.append(f"-- Strategy expression: {converted_us}")
+                    for flag, cond in dd_conditions.items():
+                        lines.append(f"--   {flag}: {cond}")
+                    # Store DD conditions for use in target load MERGE
+                    if not hasattr(self, '_dd_conditions'):
+                        self._dd_conditions = {}
+                    self._dd_conditions[mapping_name] = dd_conditions
                 else:
                     lines.append("-- DML mode: INSERT (default — no strategy expression found)")
+                lines.append("-- (Applied via MERGE in final target load)")
                 lines.append("")
                 step += 1
 
@@ -3858,7 +4114,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     table_name = f"sq_{re.sub(r'[^a-zA-Z0-9_]', '_', tf['name'].lower())}"
                     lines.append(f"{naming.create_stmt()} {naming.format_table('', table_name)} AS")
                     if sq_sql:
-                        converted_sq = self._convert_expression(sq_sql, parameters)
+                        converted_sq = self._convert_teradata_sql(sq_sql, parameters)
                         # Safety: strip always-false WHERE clauses that would zero out all data
                         _always_false_re = re.compile(r'\bWHERE\s+1\s*=\s*2\b', re.IGNORECASE)
                         if _always_false_re.search(converted_sq):
@@ -3871,7 +4127,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                         if user_filter:
                             lines.append(f"/* User Defined Join: {self._convert_expression(user_filter, parameters)} */")
                         if source_filter:
-                            sf_converted = self._convert_expression(source_filter, parameters)
+                            sf_converted = self._convert_teradata_sql(source_filter, parameters)
                             # Safety: don't emit WHERE 1=2 which zeros out all rows
                             if not re.match(r'^\s*1\s*=\s*2\s*$', sf_converted):
                                 lines.append(f"WHERE {sf_converted}")
@@ -3894,8 +4150,24 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         has_update_strategy = any(
             tf["type"] == "Update Strategy" for tf in group["transformations"]
         )
-        # Parse the actual Update Strategy expression to determine DML mode
-        # DD_INSERT = insert only, DD_UPDATE = update, DD_DELETE = delete, DD_REJECT = skip
+        # Gap 3: Check session "Treat source rows as" property
+        treat_as = "Insert"
+        if session_overrides:
+            for inst_name, ovr in session_overrides.items():
+                ta_val = ovr.get("Treat source rows as", "")
+                if ta_val:
+                    treat_as = ta_val
+                    break
+        # Also check parsed sessions for treat_source_rows_as
+        current_parsed = self._current_parsed or {}
+        for sess in current_parsed.get("sessions", []):
+            if sess.get("mapping_name", "") == mapping_name:
+                treat_as = sess.get("treat_source_rows_as", treat_as)
+                break
+        is_data_driven = has_update_strategy or treat_as.lower() == "data driven"
+        is_update_only = treat_as.lower() == "update" and not has_update_strategy
+
+        # Refine: check DD expression for actual update/delete usage
         _us_has_update = False
         _us_has_delete = False
         for tf in group["transformations"]:
@@ -3907,18 +4179,28 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     if "DD_DELETE" in expr:
                         _us_has_delete = True
 
-        # Check for SCD Type 2 pattern — only use MERGE for SCD with update logic
+        # Check for SCD Type 2 pattern — prefer MERGE for SCD with update logic
         _scd_indicators = {"effective_date", "expiry_date", "is_current", "current_flag",
                            "effective_start_date", "effective_end_date", "dw_insert_date"}
         has_scd = any(
             c.get("name", "").lower() in _scd_indicators
             for tgt in group["targets"] for c in tgt.get("columns", [])
         )
-        # Use MERGE only for SCD Type 2 + update logic; DELETE+INSERT for everything else
-        is_data_driven = has_update_strategy and has_scd and _us_has_update
+        # If no SCD and no DD_UPDATE, fall back to DELETE+INSERT instead of MERGE
+        if is_data_driven and not has_scd and not _us_has_update:
+            is_data_driven = False
+
+        # Gap 2: Retrieve DD conditions if parsed from Update Strategy
+        dd_conditions = getattr(self, '_dd_conditions', {}).get(mapping_name, {})
+
+        # Gap 4: Sort targets by load order before iterating
+        tlo_map = {tlo["target_instance"]: int(tlo.get("order", 999))
+                   for tlo in group.get("target_load_orders", [])}
+        sorted_targets = sorted(group["targets"],
+                                key=lambda t: tlo_map.get(t["name"], 999))
 
         # Final target loads for ALL targets with full column coverage
-        for tgt in group["targets"]:
+        for tgt in sorted_targets:
             tgt_name = tgt["name"]
             tgt_cols_full = [c["name"] for c in tgt["columns"]] if tgt["columns"] else ["*"]
             resolved_cols = target_columns.get(tgt_name, [])
@@ -3927,6 +4209,35 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             target_source_table = router_group_tables.get(
                 tgt_name.lower(), prev_table
             )
+
+            # Gap 13: Detect flat file targets for GCS export
+            is_flat_file_target = tgt.get("database_type", "").upper() in FLAT_FILE_TYPES
+
+            if is_flat_file_target:
+                # Generate EXPORT DATA for flat file targets
+                delimiter = tgt.get("file_format", {}).get("delimiter", ",")
+                lines.append(f"-- Flat File Target: Export to GCS")
+                lines.append(f"EXPORT DATA OPTIONS(")
+                lines.append(f"  uri='gs://{{{{ var.value.gcs_bucket }}}}/{tgt_name.lower()}/*.csv',")
+                lines.append(f"  format='CSV',")
+                lines.append(f"  overwrite=true,")
+                lines.append(f"  header=true,")
+                lines.append(f"  field_delimiter='{delimiter}'")
+                lines.append(f") AS")
+                lines.append(f"SELECT")
+                if resolved_cols:
+                    select_exprs = []
+                    for col_name, col_expr in resolved_cols:
+                        if col_expr != col_name:
+                            select_exprs.append(f"  {col_expr} AS {col_name}")
+                        else:
+                            select_exprs.append(f"  {col_name}")
+                    lines.append(",\n".join(select_exprs))
+                else:
+                    lines.append("  " + ",\n  ".join(tgt_cols_full))
+                lines.append(f"FROM {naming.format_table('', target_source_table)};")
+                lines.append("")
+                continue  # Skip normal INSERT/MERGE for flat file targets
             if target_source_table != prev_table:
                 lines.append(f"-- Note: This target is fed by router group table '{target_source_table}'")
 
@@ -3947,8 +4258,27 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     lines.append(f"-- TRUNCATE TABLE {naming.format_table('', tgt_name.lower())};  -- Uncomment for full refresh")
                 lines.append("")
 
-            if is_data_driven:
-                # Use MERGE for data-driven (Update Strategy) sessions
+            if is_update_only:
+                # Gap 3: Pure "Update" mode — generate UPDATE statement
+                key_cols = [c["name"] for c in tgt.get("columns", [])
+                            if c.get("key_type") in ("PRIMARY KEY", "PRIMARY")]
+                if not key_cols and tgt_cols_full:
+                    key_cols = [tgt_cols_full[0]]
+                update_cols = [c for c in tgt_cols_full if c not in key_cols]
+                lines.append(f"UPDATE {naming.format_table('', tgt_name.lower())} AS tgt")
+                lines.append("SET")
+                if update_cols:
+                    lines.append("  " + ",\n  ".join(f"tgt.{c} = src.{c}" for c in update_cols[:30]))
+                    if len(update_cols) > 30:
+                        lines.append(f"  /* ... and {len(update_cols) - 30} more columns */")
+                else:
+                    lines.append("  /* TODO: specify update columns */")
+                lines.append(f"FROM {naming.format_table('', target_source_table)} AS src")
+                if key_cols:
+                    lines.append(f"WHERE " + " AND ".join(f"tgt.{k} = src.{k}" for k in key_cols))
+                lines.append(";")
+            elif is_data_driven:
+                # Gap 2: Use MERGE with DD flag conditions for data-driven sessions
                 key_cols = [c["name"] for c in tgt.get("columns", [])
                             if c.get("key_type") in ("PRIMARY KEY", "PRIMARY")]
                 if not key_cols and tgt_cols_full:
@@ -3960,14 +4290,31 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 lines.append(f"MERGE {naming.format_table('', tgt_name.lower())} AS tgt")
                 lines.append(f"USING {naming.format_table('', target_source_table)} AS src")
                 lines.append(f"ON {merge_key}")
-                lines.append("WHEN MATCHED THEN UPDATE SET")
+
+                # Gap 2: Generate DD_DELETE clause if present
+                if dd_conditions.get("DD_DELETE"):
+                    delete_cond = dd_conditions["DD_DELETE"]
+                    lines.append(f"WHEN MATCHED AND ({delete_cond}) THEN DELETE")
+
+                # DD_UPDATE clause (or default WHEN MATCHED)
+                if dd_conditions.get("DD_UPDATE"):
+                    update_cond = dd_conditions["DD_UPDATE"]
+                    lines.append(f"WHEN MATCHED AND ({update_cond}) THEN UPDATE SET")
+                else:
+                    lines.append("WHEN MATCHED THEN UPDATE SET")
                 if update_cols:
                     lines.append("  " + ",\n  ".join(f"tgt.{c} = src.{c}" for c in update_cols[:30]))
                     if len(update_cols) > 30:
                         lines.append(f"  /* ... and {len(update_cols) - 30} more columns */")
                 else:
                     lines.append("  /* TODO: specify update columns */")
-                lines.append("WHEN NOT MATCHED THEN INSERT (")
+
+                # DD_INSERT clause (or default WHEN NOT MATCHED)
+                if dd_conditions.get("DD_INSERT"):
+                    insert_cond = dd_conditions["DD_INSERT"]
+                    lines.append(f"WHEN NOT MATCHED AND ({insert_cond}) THEN INSERT (")
+                else:
+                    lines.append("WHEN NOT MATCHED THEN INSERT (")
                 lines.append("  " + ",\n  ".join(tgt_cols_full))
                 lines.append(") VALUES (")
                 if resolved_cols:
@@ -4030,7 +4377,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             post_sql = ovr.get("Post SQL", "").strip()
             if post_sql:
                 lines.append(f"-- Post-SQL from session (instance: {inst_name})")
-                lines.append(self._convert_expression(post_sql, parameters))
+                lines.append(self._convert_teradata_sql(post_sql, parameters))
                 lines.append(";")
                 lines.append("")
 
@@ -4221,6 +4568,48 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                     j += 1
                 lkp_name = expr[i + 5:j]
                 tokens.append({"type": "LKP_REF", "value": lkp_name})
+                i = j
+                continue
+
+            # :EXP.port_name — reference to Expression transformation output
+            if ch == ':' and i + 1 < n and expr[i + 1:i + 5].upper() == 'EXP.':
+                j = i + 5
+                start_j = j
+                while j < n and (expr[j].isalnum() or expr[j] == '_'):
+                    j += 1
+                exp_name = expr[start_j:j]
+                # Check for function call syntax :EXP.NAME(args)
+                if j < n and expr[j] == '(':
+                    depth = 1
+                    k = j + 1
+                    while k < n and depth > 0:
+                        if expr[k] == '(':
+                            depth += 1
+                        elif expr[k] == ')':
+                            depth -= 1
+                        k += 1
+                    tokens.append({"type": "EXP_REF", "value": exp_name, "args_str": expr[j+1:k-1]})
+                    i = k
+                else:
+                    tokens.append({"type": "EXP_REF", "value": exp_name, "args_str": ""})
+                    i = j
+                continue
+
+            # :SEQ.name.NEXTVAL or :SEQ.name.CURRVAL
+            if ch == ':' and i + 1 < n and expr[i + 1:i + 5].upper() == 'SEQ.':
+                j = i + 5
+                start_j = j
+                while j < n and (expr[j].isalnum() or expr[j] == '_'):
+                    j += 1
+                seq_name = expr[start_j:j]
+                port = "NEXTVAL"
+                if j < n and expr[j] == '.':
+                    j += 1
+                    port_start = j
+                    while j < n and (expr[j].isalnum() or expr[j] == '_'):
+                        j += 1
+                    port = expr[port_start:j].upper()
+                tokens.append({"type": "SEQ_REF", "value": seq_name, "port": port})
                 i = j
                 continue
 
@@ -4506,6 +4895,20 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 return f"(SELECT /* output_col */ FROM /* {lkp_name} */ WHERE /* key_col */ = {args[0]})"
             return f"/* :LKP.{lkp_name} - unconnected, needs manual resolution */ NULL"
 
+        if node_type == "EXP_REF":
+            exp_name = node.get("value", "")
+            args_str = node.get("args_str", "")
+            if args_str:
+                return f"{exp_name}_{args_str} /* :EXP.{exp_name}({args_str}) */"
+            return f"{exp_name} /* :EXP.{exp_name} */"
+
+        if node_type == "SEQ_REF":
+            seq_name = node.get("value", "")
+            port = node.get("port", "NEXTVAL")
+            if port == "CURRVAL":
+                return f"seq_{seq_name.lower()}_val /* :SEQ.{seq_name}.CURRVAL — reuses sequence CTE */"
+            return f"ROW_NUMBER() OVER (ORDER BY 1) /* :SEQ.{seq_name}.NEXTVAL */"
+
         if node_type == "call":
             name_upper = node["name"].upper()
             args = node.get("args", [])
@@ -4673,6 +5076,65 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
                 val = self._ast_to_bigquery(args[0], parameters)
                 return f"COALESCE({val}, 0)"
 
+            # DATE_DIFF argument rewriting: DATE_DIFF(d1, d2, 'DD') → DATE_DIFF(d1, d2, DAY)
+            if name_upper == "DATE_DIFF" and len(args) >= 3:
+                date_part_map = {"'DD'": "DAY", "'MM'": "MONTH", "'YY'": "YEAR", "'YYYY'": "YEAR",
+                                 "'HH'": "HOUR", "'HH24'": "HOUR", "'MI'": "MINUTE", "'SS'": "SECOND",
+                                 "'MS'": "MILLISECOND"}
+                conv_args = [self._ast_to_bigquery(a, parameters) for a in args]
+                part_arg = conv_args[2].strip().upper()
+                bq_part = date_part_map.get(part_arg, part_arg.strip("'"))
+                return f"DATE_DIFF({conv_args[0]}, {conv_args[1]}, {bq_part})"
+
+            # GET_DATE_PART rewriting: GET_DATE_PART(d, 'MM') → EXTRACT(MONTH FROM d)
+            if name_upper == "GET_DATE_PART" and len(args) >= 2:
+                part_map = {"'MM'": "MONTH", "'DD'": "DAY", "'YY'": "YEAR", "'YYYY'": "YEAR",
+                            "'HH'": "HOUR", "'HH24'": "HOUR", "'MI'": "MINUTE", "'SS'": "SECOND",
+                            "'DDD'": "DAYOFYEAR", "'D'": "DAYOFWEEK", "'Q'": "QUARTER"}
+                conv_args = [self._ast_to_bigquery(a, parameters) for a in args]
+                part_arg = conv_args[1].strip().upper()
+                bq_part = part_map.get(part_arg, part_arg.strip("'"))
+                return f"EXTRACT({bq_part} FROM {conv_args[0]})"
+
+            # SET_DATE_PART → DATE_TRUNC (approximate equivalent)
+            if name_upper == "SET_DATE_PART" and len(args) >= 3:
+                part_map = {"'MM'": "MONTH", "'DD'": "DAY", "'YY'": "YEAR", "'YYYY'": "YEAR",
+                            "'HH'": "HOUR", "'MI'": "MINUTE", "'SS'": "SECOND"}
+                conv_args = [self._ast_to_bigquery(a, parameters) for a in args]
+                part_arg = conv_args[1].strip().upper()
+                bq_part = part_map.get(part_arg, part_arg.strip("'"))
+                return f"DATE_TRUNC({conv_args[0]}, {bq_part}) /* SET_DATE_PART approximation */"
+
+            # IS_SPACES(x) → (LENGTH(TRIM(x)) = 0)
+            if name_upper == "IS_SPACES" and len(args) >= 1:
+                val = self._ast_to_bigquery(args[0], parameters)
+                return f"(LENGTH(TRIM({val})) = 0)"
+
+            # NVL2(x, if_not_null, if_null) → IF(x IS NOT NULL, if_not_null, if_null)
+            if name_upper == "NVL2" and len(args) >= 3:
+                conv_args = [self._ast_to_bigquery(a, parameters) for a in args]
+                return f"IF({conv_args[0]} IS NOT NULL, {conv_args[1]}, {conv_args[2]})"
+
+            # GREATEST / LEAST — native in BigQuery
+            if name_upper in ("GREATEST", "LEAST"):
+                conv_args = [self._ast_to_bigquery(a, parameters) for a in args]
+                return f"{name_upper}({', '.join(conv_args)})"
+
+            # LPAD / RPAD with 2 args → add default pad char ' '
+            if name_upper in ("LPAD", "RPAD") and len(args) == 2:
+                conv_args = [self._ast_to_bigquery(a, parameters) for a in args]
+                return f"{name_upper}({conv_args[0]}, {conv_args[1]}, ' ')"
+
+            # TO_FLOAT → CAST(x AS FLOAT64)
+            if name_upper == "TO_FLOAT" and len(args) >= 1:
+                val = self._ast_to_bigquery(args[0], parameters)
+                return f"CAST({val} AS FLOAT64)"
+
+            # TO_BIGINT → CAST(x AS INT64)
+            if name_upper == "TO_BIGINT" and len(args) >= 1:
+                val = self._ast_to_bigquery(args[0], parameters)
+                return f"CAST({val} AS INT64)"
+
             # Default: pass through as function call with converted arguments
             conv_args = [self._ast_to_bigquery(a, parameters) for a in args]
             func_name = node["name"]  # preserve original casing
@@ -4688,6 +5150,77 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
         # Fallback
         return str(node.get("value", ""))
+
+    # ── Teradata SQL Dialect Conversion ─────────────────────────
+
+    def _convert_teradata_sql(self, sql: str, parameters: list | None = None) -> str:
+        """Convert Teradata-specific SQL syntax to BigQuery SQL.
+
+        Handles full SQL statements (Sql Query overrides, Pre/Post SQL) that use
+        Teradata dialect, not just Informatica expression syntax.
+        """
+        if not sql or not sql.strip():
+            return sql
+
+        converted = sql
+
+        # SEL → SELECT (Teradata shorthand)
+        converted = re.sub(r'\bSEL\b', 'SELECT', converted, flags=re.IGNORECASE)
+
+        # VOLATILE TABLE → TEMP TABLE
+        converted = re.sub(r'\bVOLATILE\s+TABLE\b', 'TEMP TABLE', converted, flags=re.IGNORECASE)
+
+        # COLLECT STATISTICS → comment (not applicable in BigQuery)
+        converted = re.sub(
+            r'\bCOLLECT\s+STAT(?:ISTICS)?\b[^;]*;?',
+            '-- COLLECT STATISTICS removed (not applicable in BigQuery)',
+            converted, flags=re.IGNORECASE
+        )
+
+        # LOCK TABLE → comment (not applicable in BigQuery)
+        converted = re.sub(
+            r'\bLOCK\s+(?:TABLE|ROW)\b[^;]*(?:FOR\s+(?:ACCESS|READ|WRITE|EXCLUSIVE))',
+            '-- LOCK removed (not applicable in BigQuery)',
+            converted, flags=re.IGNORECASE
+        )
+
+        # SAMPLE n → LIMIT n (approximate)
+        converted = re.sub(
+            r'\bSAMPLE\s+(\d+)\b',
+            r'LIMIT \1 /* Teradata SAMPLE converted to LIMIT */',
+            converted, flags=re.IGNORECASE
+        )
+
+        # .DATE column syntax (Teradata date casting) — e.g., column_name (DATE)
+        # This is highly context-specific, add a comment marker
+        converted = re.sub(
+            r'\(DATE\s*,\s*FORMAT\s*\'([^\']+)\'\)',
+            r"/* Teradata DATE FORMAT '\1' — use FORMAT_DATE in BigQuery */",
+            converted, flags=re.IGNORECASE
+        )
+
+        # MINUS → EXCEPT DISTINCT (already in expression converter, but ensure for full SQL)
+        converted = re.sub(r'\bMINUS\b', 'EXCEPT DISTINCT', converted, flags=re.IGNORECASE)
+
+        # QUALIFY → Keep as-is (BigQuery supports QUALIFY natively)
+        # No conversion needed since BigQuery 2021+ supports QUALIFY
+
+        # Apply regex-based Informatica expression conversions for embedded functions
+        # (Skip AST parser since this is a full SQL statement, not a single expression)
+        from agents.informatica_migration_advanced import _COMPILED_CONVERSIONS, _PARAM_RE
+        for compiled_re, replacement in _COMPILED_CONVERSIONS:
+            converted = compiled_re.sub(replacement, converted)
+        # Replace $$parameters with @param_name
+        converted = _PARAM_RE.sub(r'@\1', converted)
+
+        # Post-process ISNULL marker
+        isnull_re = re.compile(r'_ISNULL_BQ\(([^)]+)\)')
+        converted = isnull_re.sub(r'(\1 IS NULL)', converted)
+        # Post-process IS_NUMBER marker
+        is_number_re = re.compile(r'_IS_NUMBER_BQ\(([^)]+)\)')
+        converted = is_number_re.sub(r'(SAFE_CAST(\1 AS FLOAT64) IS NOT NULL)', converted)
+
+        return converted
 
     # ── Expression Conversion ────────────────────────────────────
 
@@ -4946,6 +5479,13 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             expression_coverage = max(0, expression_coverage - (todo_count * 5))
             issues.append(f"{todo_count} TODO marker(s) in generated SQL")
 
+        # Gap 18: Penalize unresolved $$parameters
+        unresolved_params = len(re.findall(r'\$\$\w+', sql)) if sql else 0
+        if unresolved_params > 0:
+            param_penalty = min(unresolved_params * 5, 25)
+            expression_coverage = max(0, expression_coverage - param_penalty)
+            issues.append(f"{unresolved_params} $$parameter(s) not resolved to @param format")
+
         # 2. Column coverage (25%): % of target columns present in final INSERT/MERGE
         total_target_cols = 0
         found_target_cols = 0
@@ -4971,6 +5511,18 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         else:
             issues.append("Missing CREATE TABLE statements for transformation steps")
         dml_completeness = min(dml_score, 100)
+
+        # Gap 17: Adjust DML score for Update Strategy coverage
+        has_us = any(tf["type"] == "Update Strategy" for tf in group.get("transformations", []))
+        if has_us:
+            if "THEN DELETE" in sql_upper:
+                pass  # Full DD support — no penalty
+            elif "MERGE" in sql_upper:
+                dml_completeness = min(dml_completeness, 80)
+                issues.append("Update Strategy present but DD_DELETE not translated")
+            else:
+                dml_completeness = min(dml_completeness, 40)
+                issues.append("Update Strategy present but MERGE not generated")
 
         # 4. Join accuracy (15%): No placeholder joins, all lookups resolved
         join_accuracy = 100
@@ -5296,11 +5848,22 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         filewatch = ew_task.get("filewatch_name", "")
         is_workflow_event = "wkfl_" in name.lower() or ew_task.get("user_defined_event", False)
 
+        # Gap 12: Enhanced workflow event detection
+        ew_name = name
+        if not ew_name.startswith("wkfl_") and not ew_name.startswith("Wkfl_"):
+            # Check if any filewatch or user event references a workflow
+            user_event = ew_task.get("user_event", "")
+            for ref in (filewatch, user_event, ew_name):
+                if re.match(r'(?i)wkfl_', ref):
+                    ew_name = ref
+                    is_workflow_event = True
+                    break
+
         lines = [f"    # Event Wait: {name}"]
 
         if is_workflow_event:
             # Map to ExternalTaskSensor for cross-workflow dependencies
-            ext_dag = re.sub(r'[^a-zA-Z0-9_]', '_', filewatch.lower()) if filewatch else task_id
+            ext_dag = re.sub(r'[^a-zA-Z0-9_]', '_', (ew_name if ew_name != name else filewatch).lower()) if (ew_name != name or filewatch) else task_id
             lines.extend([
                 f"    {task_id} = ExternalTaskSensor(",
                 f'        task_id="{task_id}",',
@@ -5420,6 +5983,56 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             "",
         ])
         return lines
+
+    def _translate_command_to_gcp(self, command: str) -> tuple[str, str]:
+        """Translate Informatica CLI command to GCP equivalent.
+
+        Returns: (operator_type, translated_command)
+        - operator_type: "BashOperator", "TriggerDagRunOperator", or "GCSOperator"
+        - translated_command: the GCP-equivalent command or operator config
+        """
+        cmd_lower = command.lower().strip()
+
+        # pmcmd startworkflow → TriggerDagRunOperator
+        pmcmd_match = re.search(r'pmcmd\s+startworkflow\s+.*?(\w+)\s*$', command, re.IGNORECASE)
+        if pmcmd_match:
+            wf_name = pmcmd_match.group(1)
+            dag_id = re.sub(r'[^a-zA-Z0-9_]', '_', wf_name.lower())
+            return ("TriggerDagRunOperator", dag_id)
+
+        # File copy → gsutil cp
+        if re.search(r'\bcp\b.*\b(\.dat|\.csv|\.txt|\.xml|\.ff)\b', cmd_lower):
+            translated = re.sub(r'\bcp\b', 'gsutil cp', command, count=1, flags=re.IGNORECASE)
+            return ("BashOperator", translated + '  # Translated: cp → gsutil cp')
+
+        # File move → gsutil mv
+        if re.search(r'\bmv\b.*\b(\.dat|\.csv|\.txt|\.xml|\.ff)\b', cmd_lower):
+            translated = re.sub(r'\bmv\b', 'gsutil mv', command, count=1, flags=re.IGNORECASE)
+            return ("BashOperator", translated + '  # Translated: mv → gsutil mv')
+
+        # File remove → gsutil rm
+        if re.search(r'\brm\b.*\b(\.dat|\.csv|\.txt|\.xml|\.ff)\b', cmd_lower):
+            translated = re.sub(r'\brm\b', 'gsutil rm', command, count=1, flags=re.IGNORECASE)
+            return ("BashOperator", translated + '  # Translated: rm → gsutil rm')
+
+        # mkdir → gsutil (no-op for GCS, directories are virtual)
+        if cmd_lower.startswith('mkdir'):
+            return ("BashOperator", f"echo 'GCS directories are virtual — no mkdir needed'  # Original: {command}")
+
+        # SFTP commands → suggestion
+        if 'sftp' in cmd_lower or 'scp' in cmd_lower:
+            return ("BashOperator", f"echo 'TODO: Replace SFTP with Cloud Storage Transfer Service'  # Original: {command}")
+
+        # Archive/tar/gzip → gsutil
+        if any(kw in cmd_lower for kw in ('tar ', 'gzip ', 'gunzip ', 'archive')):
+            return ("BashOperator", command + '  # TODO: Consider gsutil mv to archive bucket')
+
+        # Informatica-specific commands that have no GCP equivalent
+        if any(kw in cmd_lower for kw in ('pmcmd', 'infacmd', 'pmrep')):
+            return ("BashOperator", f"echo 'TODO: Replace Informatica CLI command with GCP equivalent'  # Original: {command}")
+
+        # Default: keep as BashOperator with original command
+        return ("BashOperator", command)
 
     def _generate_airflow_dag(self, parsed: dict, analysis: dict, mapping_results: list) -> str:
         """Generate Airflow DAG with parallelism, task groups, and multiple operator types.
@@ -5690,52 +6303,82 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
             # Skip top-level declaration if consumed by a worklet
             if cmd["name"] in worklet_consumed_tasks:
                 continue
-            cmd_str = " && ".join(cmd.get("commands", [])) or ""
-            has_ksh = any('.ksh' in c or '.sh' in c for c in cmd.get("commands", []))
-            has_sftp = any('sftp' in c.lower() or 'scp' in c.lower() for c in cmd.get("commands", []))
-            has_validation = any('valid' in c.lower() or 'recon' in c.lower() or 'count' in c.lower()
-                                for c in cmd.get("commands", []))
-
+            raw_commands = cmd.get("commands", [])
             lines.append(f'    # Command Task: {cmd["name"]}')
             lines.append(f'    # Original: {cmd.get("commands", ["(none)"])[0][:80]}')
 
-            if has_sftp:
-                # SFTP/SCP commands → GCS transfer suggestion
-                lines.append(f'    # MIGRATE_TO_GCP: Replace SFTP/SCP with GCS transfer operator')
-                lines.append(f'    # Suggested: Use GCSToGCSOperator, SFTPToGCSOperator, or a Cloud Data Fusion pipeline')
-                lines.append(f'    {task_id} = PythonOperator(')
-                lines.append(f'        task_id="{task_id}",')
-                lines.append(f'        python_callable=lambda: print("MIGRATE_TO_GCP: {cmd["name"]} — '
-                             f'original command transferred files via SFTP. Replace with GCS transfer."),')
-                if task_id in task_trigger_rules:
-                    lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
-                lines.append("    )")
-            elif has_validation:
-                # Validation/reconciliation scripts → Python operator
-                lines.append(f'    # MIGRATE_TO_GCP: Replace validation script with BigQuery count check')
-                lines.append(f'    {task_id} = PythonOperator(')
-                lines.append(f'        task_id="{task_id}",')
-                lines.append(f'        python_callable=lambda: print("MIGRATE_TO_GCP: {cmd["name"]} — '
-                             f'original script performed data validation. Replace with BigQuery row count comparison."),')
-                if task_id in task_trigger_rules:
-                    lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
-                lines.append("    )")
-            elif has_ksh:
-                # Generic .ksh scripts → Python operator stub with migration guidance
-                lines.append(f'    # MIGRATE_TO_GCP: Legacy .ksh script must be rewritten for cloud')
-                lines.append(f'    # Original commands: {cmd_str[:120]}')
-                lines.append(f'    {task_id} = PythonOperator(')
-                lines.append(f'        task_id="{task_id}",')
-                lines.append(f'        python_callable=lambda: print("MIGRATE_TO_GCP: {cmd["name"]} — '
-                             f'original .ksh script needs cloud migration. Review original script logic."),')
-                if task_id in task_trigger_rules:
-                    lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
-                lines.append("    )")
+            # Gap 11: Translate Informatica commands to GCP equivalents
+            if raw_commands:
+                translated_parts = []
+                has_trigger_dag = False
+                trigger_dag_id = None
+                has_sftp = any('sftp' in c.lower() or 'scp' in c.lower() for c in raw_commands)
+                has_ksh = any('.ksh' in c or '.sh' in c for c in raw_commands)
+                has_validation = any('valid' in c.lower() or 'recon' in c.lower() or 'count' in c.lower()
+                                    for c in raw_commands)
+
+                for raw_cmd in raw_commands:
+                    op_type, translated = self._translate_command_to_gcp(raw_cmd)
+                    if op_type == "TriggerDagRunOperator":
+                        has_trigger_dag = True
+                        trigger_dag_id = translated
+                    else:
+                        translated_parts.append(translated)
+
+                if has_trigger_dag and trigger_dag_id:
+                    lines.append(f'    {task_id} = TriggerDagRunOperator(')
+                    lines.append(f'        task_id="{task_id}",')
+                    lines.append(f'        trigger_dag_id="{trigger_dag_id}",')
+                    lines.append('        wait_for_completion=False,')
+                    if task_id in task_trigger_rules:
+                        lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
+                    lines.append("    )")
+                elif has_sftp:
+                    lines.append(f'    # MIGRATE_TO_GCP: Replace SFTP/SCP with GCS transfer operator')
+                    lines.append(f'    {task_id} = PythonOperator(')
+                    lines.append(f'        task_id="{task_id}",')
+                    lines.append(f'        python_callable=lambda: print("MIGRATE_TO_GCP: {cmd["name"]} — '
+                                 f'Replace SFTP with GCS transfer."),')
+                    if task_id in task_trigger_rules:
+                        lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
+                    lines.append("    )")
+                elif has_ksh:
+                    lines.append(f'    # MIGRATE_TO_GCP: Legacy .ksh script must be rewritten for cloud')
+                    cmd_str = " && ".join(translated_parts)
+                    lines.append(f'    # Original commands: {cmd_str[:120]}')
+                    lines.append(f'    {task_id} = PythonOperator(')
+                    lines.append(f'        task_id="{task_id}",')
+                    lines.append(f'        python_callable=lambda: print("MIGRATE_TO_GCP: {cmd["name"]} — '
+                                 f'original .ksh script needs cloud migration."),')
+                    if task_id in task_trigger_rules:
+                        lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
+                    lines.append("    )")
+                elif has_validation:
+                    lines.append(f'    # MIGRATE_TO_GCP: Replace validation script with BigQuery count check')
+                    lines.append(f'    {task_id} = PythonOperator(')
+                    lines.append(f'        task_id="{task_id}",')
+                    lines.append(f'        python_callable=lambda: print("MIGRATE_TO_GCP: {cmd["name"]} — '
+                                 f'Replace with BigQuery row count comparison."),')
+                    if task_id in task_trigger_rules:
+                        lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
+                    lines.append("    )")
+                else:
+                    cmd_str = " && ".join(translated_parts)
+                    lines.append(f'    {task_id} = BashOperator(')
+                    lines.append(f'        task_id="{task_id}",')
+                    lines.append(f'        bash_command="""{cmd_str}""",')
+                    lines.append('        env={')
+                    lines.append('            "PMRootDir": "{{ var.value.pm_root_dir }}",')
+                    lines.append('            "ETL_HOME": "{{ var.value.etl_home }}",')
+                    lines.append('            "INFA_HOME": "{{ var.value.infa_home }}",')
+                    lines.append('        },')
+                    if task_id in task_trigger_rules:
+                        lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
+                    lines.append("    )")
             else:
-                # Non-ksh commands — keep as BashOperator but flag for review
                 lines.append(f'    {task_id} = BashOperator(')
                 lines.append(f'        task_id="{task_id}",')
-                lines.append(f'        bash_command="""{cmd_str or "echo TODO: implement command"}""",')
+                lines.append(f'        bash_command="""echo \'TODO: implement command\' """,')
                 if task_id in task_trigger_rules:
                     lines.append(f"        trigger_rule={task_trigger_rules[task_id]},")
                 lines.append("    )")
