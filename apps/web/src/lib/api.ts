@@ -99,65 +99,65 @@ export async function migrateInformatica(xmlContent: string, filename: string) {
   });
 }
 
-// --- Informatica Migration Advanced (SSE streaming) ---
+// --- Informatica Migration Advanced (polling) ---
 
 export async function migrateInformaticaAdvanced(
   xmlContent: string,
   filename: string,
   onProgress?: (message: string, current: number, total: number) => void,
 ) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 45 * 60 * 1000); // 45 min safety net
-
-  try {
-    const res = await fetch(`${API_URL}/api/agents/informatica-migration/migrate-advanced`, {
+  // Step 1: Start the job — returns immediately with a job ID
+  const startRes = await fetchAPI<{ job_id: string; status: string }>(
+    '/api/agents/informatica-migration/migrate-advanced',
+    {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ xml_content: xmlContent, filename }),
-      signal: controller.signal,
-    });
+    },
+  );
 
-    if (!res.ok) throw new Error(`API error: ${res.status}`);
+  const jobId = startRes.job_id;
 
-    const reader = res.body?.getReader();
-    if (!reader) throw new Error('No response body');
+  // Step 2: Poll for progress/result every 3 seconds
+  const POLL_INTERVAL = 3000;
+  const MAX_POLL_TIME = 45 * 60 * 1000; // 45 min safety net
+  const startTime = Date.now();
 
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let finalResult: import('./types').InformaticaAdvancedMigrationResponse | null = null;
+  while (Date.now() - startTime < MAX_POLL_TIME) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL));
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    const status = await fetchAPI<{
+      status: string;
+      progress_message?: string;
+      progress_current?: number;
+      progress_total?: number;
+      result?: import('./types').InformaticaAdvancedMigrationResponse;
+      error?: string;
+    }>(`/api/agents/informatica-migration/migrate-advanced/${jobId}`);
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = line.slice(6);
-
-        try {
-          const event = JSON.parse(payload);
-          if (event.type === 'progress' && onProgress) {
-            onProgress(event.message, event.current, event.total);
-          } else if (event.type === 'result') {
-            finalResult = event.data;
-          } else if (event.type === 'error') {
-            return { error: event.error } as import('./types').InformaticaAdvancedMigrationResponse;
-          }
-        } catch {
-          // skip malformed JSON lines
-        }
+    if (status.status === 'running') {
+      if (onProgress && status.progress_message) {
+        onProgress(
+          status.progress_message,
+          status.progress_current ?? 0,
+          status.progress_total ?? 0,
+        );
       }
+      continue;
     }
 
-    if (!finalResult) throw new Error('No result received from server');
-    return finalResult;
-  } finally {
-    clearTimeout(timeoutId);
+    if (status.status === 'done' && status.result) {
+      return status.result;
+    }
+
+    if (status.status === 'error') {
+      return { error: status.error || 'Migration failed' } as import('./types').InformaticaAdvancedMigrationResponse;
+    }
+
+    // not_found or unexpected status
+    return { error: `Unexpected job status: ${status.status}` } as import('./types').InformaticaAdvancedMigrationResponse;
   }
+
+  return { error: 'Migration timed out after 45 minutes' } as import('./types').InformaticaAdvancedMigrationResponse;
 }
 
 // --- NL to DAG ---
