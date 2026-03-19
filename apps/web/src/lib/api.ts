@@ -99,21 +99,62 @@ export async function migrateInformatica(xmlContent: string, filename: string) {
   });
 }
 
-// --- Informatica Migration Advanced ---
+// --- Informatica Migration Advanced (SSE streaming) ---
 
-export async function migrateInformaticaAdvanced(xmlContent: string, filename: string) {
-  // Advanced migration makes per-mapping LLM calls and needs a longer timeout
+export async function migrateInformaticaAdvanced(
+  xmlContent: string,
+  filename: string,
+  onProgress?: (message: string, current: number, total: number) => void,
+) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 45 * 60 * 1000); // 45 min — LLM processes all mappings
+  const timeoutId = setTimeout(() => controller.abort(), 45 * 60 * 1000); // 45 min safety net
+
   try {
-    return await fetchAPI<import('./types').InformaticaAdvancedMigrationResponse>(
-      '/api/agents/informatica-migration/migrate-advanced',
-      {
-        method: 'POST',
-        body: JSON.stringify({ xml_content: xmlContent, filename }),
-        signal: controller.signal,
-      },
-    );
+    const res = await fetch(`${API_URL}/api/agents/informatica-migration/migrate-advanced`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ xml_content: xmlContent, filename }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('No response body');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalResult: import('./types').InformaticaAdvancedMigrationResponse | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+
+        try {
+          const event = JSON.parse(payload);
+          if (event.type === 'progress' && onProgress) {
+            onProgress(event.message, event.current, event.total);
+          } else if (event.type === 'result') {
+            finalResult = event.data;
+          } else if (event.type === 'error') {
+            return { error: event.error } as import('./types').InformaticaAdvancedMigrationResponse;
+          }
+        } catch {
+          // skip malformed JSON lines
+        }
+      }
+    }
+
+    if (!finalResult) throw new Error('No result received from server');
+    return finalResult;
   } finally {
     clearTimeout(timeoutId);
   }

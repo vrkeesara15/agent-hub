@@ -383,6 +383,7 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         selected_mappings: list[str] | None = None,
         connection_config: dict | None = None,
         use_cache: bool = True,
+        progress_callback=None,
     ) -> dict:
         """Main entry: parse, build connector graph, process per-mapping, score."""
 
@@ -480,18 +481,38 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
         if self.llm.client is not None:
             # ── LLM path: send representatives through LLM with concurrency limit ──
             llm_semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
+            _completed_count = 0
+            _total_unique = len(rep_groups)
 
             async def _process_with_llm(mapping_name, group):
+                nonlocal _completed_count
                 async with llm_semaphore:
                     mg_cg = group.get("connector_graph", connector_graph)
-                    return await self._process_mapping(
+                    result = await self._process_mapping(
                         mapping_name, group, parsed, mg_cg, parameters
                     )
+                    _completed_count += 1
+                    if progress_callback:
+                        await progress_callback(
+                            "processing",
+                            f"Processed mapping {_completed_count}/{_total_unique}: {mapping_name}",
+                            _completed_count,
+                            _total_unique,
+                        )
+                    return result
 
             logger.info(
                 "Processing %d unique mappings with LLM (concurrency=%d, %d variants deduped)",
                 len(rep_groups), LLM_CONCURRENCY, total_variants,
             )
+
+            if progress_callback:
+                await progress_callback(
+                    "processing",
+                    f"Starting LLM processing for {_total_unique} unique mappings ({total_variants} variants deduped)",
+                    0,
+                    _total_unique,
+                )
 
             tasks = [
                 _process_with_llm(name, group)
