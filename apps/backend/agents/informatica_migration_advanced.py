@@ -5207,7 +5207,6 @@ class InformaticaMigrationAdvancedAgent(BaseAgent):
 
         # Apply regex-based Informatica expression conversions for embedded functions
         # (Skip AST parser since this is a full SQL statement, not a single expression)
-        from agents.informatica_migration_advanced import _COMPILED_CONVERSIONS, _PARAM_RE
         for compiled_re, replacement in _COMPILED_CONVERSIONS:
             converted = compiled_re.sub(replacement, converted)
         # Replace $$parameters with @param_name
