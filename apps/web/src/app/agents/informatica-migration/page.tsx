@@ -90,6 +90,7 @@ export default function InformaticaMigrationPage() {
   const [result, setResult] = useState<InformaticaMigrationResponse | null>(null);
   const [advancedResult, setAdvancedResult] = useState<InformaticaAdvancedMigrationResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('report');
   const [inputMode, setInputMode] = useState<InputMode>('upload');
@@ -137,12 +138,19 @@ export default function InformaticaMigrationPage() {
     if (!xmlInput.trim()) return;
     setLoading(true);
     setError(null);
+    setProgress(null);
     setResult(null);
     setAdvancedResult(null);
     setActiveTab(isAdvanced ? 'scorecard' : 'report');
     try {
       if (isAdvanced) {
-        const data = await migrateInformaticaAdvanced(xmlInput, fileName || 'workflow.xml');
+        const data = await migrateInformaticaAdvanced(
+          xmlInput,
+          fileName || 'workflow.xml',
+          (message, current, total) => {
+            setProgress(`${message} (${current}/${total})`);
+          },
+        );
         if (data.error) {
           setError(data.error);
         } else {
@@ -166,6 +174,7 @@ export default function InformaticaMigrationPage() {
       }
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   }, [xmlInput, fileName, isAdvanced]);
 
@@ -502,6 +511,7 @@ export default function InformaticaMigrationPage() {
             <div className="text-center">
               <p className="text-sm font-medium text-text-primary">{isAdvanced ? 'Advanced Analysis: Processing mappings individually...' : 'Analyzing Informatica XML...'}</p>
               <p className="text-xs text-text-secondary mt-1">{isAdvanced ? 'Each mapping is being analyzed with dedicated LLM calls for higher accuracy' : 'Parsing transformations, generating BigQuery SQL & Airflow DAG'}</p>
+              {progress && <p className="text-xs text-purple-600 dark:text-purple-400 mt-2 font-mono">{progress}</p>}
             </div>
           </div>
         </div>
