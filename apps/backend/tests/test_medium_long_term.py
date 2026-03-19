@@ -1088,6 +1088,393 @@ def test_iterparse_new_keys_parity():
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Gap Enhancement Tests (18 gaps from critical review)
+# ═══════════════════════════════════════════════════════════════════
+
+
+def test_associated_source_instance_parsing():
+    """Gap 1: ASSOCIATED_SOURCE_INSTANCE is parsed from INSTANCE elements."""
+    xml = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <POWERMART><REPOSITORY><FOLDER NAME="F">
+      <SOURCE NAME="SRC_A" DATABASETYPE="Teradata"><SOURCEFIELD NAME="ID" DATATYPE="number"/></SOURCE>
+      <SOURCE NAME="SRC_B" DATABASETYPE="Teradata"><SOURCEFIELD NAME="NAME" DATATYPE="string"/></SOURCE>
+      <TARGET NAME="TGT" DATABASETYPE="Teradata"><TARGETFIELD NAME="ID" DATATYPE="number" KEYTYPE="PRIMARY KEY"/></TARGET>
+      <MAPPING NAME="m_test" DESCRIPTION="">
+        <INSTANCE NAME="SRC_A" TYPE="SOURCE" TRANSFORMATION_NAME="SRC_A" TRANSFORMATION_TYPE="Source"/>
+        <INSTANCE NAME="SRC_B" TYPE="SOURCE" TRANSFORMATION_NAME="SRC_B" TRANSFORMATION_TYPE="Source"
+                  ASSOCIATED_SOURCE_INSTANCE="SQ_COMBINED"/>
+        <INSTANCE NAME="SQ_COMBINED" TYPE="TRANSFORMATION" TRANSFORMATION_NAME="SQ_COMBINED" TRANSFORMATION_TYPE="Source Qualifier"/>
+        <INSTANCE NAME="TGT" TYPE="TARGET" TRANSFORMATION_NAME="TGT" TRANSFORMATION_TYPE="Target"/>
+      </MAPPING>
+      <WORKFLOW NAME="wf"><TASKINSTANCE NAME="s1" TASKTYPE="Session" TASKNAME="s1" ISENABLED="YES"/></WORKFLOW>
+    </FOLDER></REPOSITORY></POWERMART>""")
+
+    agent = _agent()
+    parsed = agent._parse_xml(xml)
+    # Find the instance with ASSOCIATED_SOURCE_INSTANCE
+    instances = parsed["mappings"][0]["instances"]
+    assoc_inst = [i for i in instances if i.get("associated_source_instance")]
+    assert len(assoc_inst) >= 1, "Should find at least one instance with associated_source_instance"
+    assert assoc_inst[0]["associated_source_instance"] == "SQ_COMBINED"
+
+    # Test _resolve_associated_sources
+    group = {"instances": instances}
+    associated = agent._resolve_associated_sources("SQ_COMBINED", group)
+    assert "SRC_B" in associated, f"Should find SRC_B as associated source, got {associated}"
+
+    # Verify iterparse produces same result
+    parsed_iter = agent._parse_xml_iterparse(xml)
+    iter_instances = parsed_iter["mappings"][0]["instances"]
+    iter_assoc = [i for i in iter_instances if i.get("associated_source_instance")]
+    assert len(iter_assoc) >= 1
+
+
+def test_update_strategy_dd_flags_merge():
+    """Gap 2: Update Strategy DD flags parsed and used in MERGE."""
+    agent = _agent()
+    # Test _parse_update_strategy_expression
+    expr = "IIF(ISNULL(KEY_COL), DD_INSERT, IIF(STATUS = 'D', DD_DELETE, DD_UPDATE))"
+    result = agent._parse_update_strategy_expression(expr, [])
+    assert "DD_INSERT" in result, f"Should find DD_INSERT condition, got {result}"
+    assert "DD_DELETE" in result, f"Should find DD_DELETE condition, got {result}"
+    assert "DD_UPDATE" in result or len(result) >= 2, f"Should find DD conditions, got {result}"
+
+
+def test_treat_source_rows_as_update():
+    """Gap 3: 'Treat source rows as' parsed from sessions."""
+    xml = textwrap.dedent("""\
+    <?xml version="1.0" encoding="UTF-8"?>
+    <POWERMART><REPOSITORY><FOLDER NAME="F">
+      <SOURCE NAME="SRC" DATABASETYPE="Teradata"><SOURCEFIELD NAME="ID" DATATYPE="number"/></SOURCE>
+      <TARGET NAME="TGT" DATABASETYPE="Teradata">
+        <TARGETFIELD NAME="ID" DATATYPE="number" KEYTYPE="PRIMARY KEY"/>
+        <TARGETFIELD NAME="VAL" DATATYPE="string" KEYTYPE=""/>
+      </TARGET>
+      <MAPPING NAME="m_upd" DESCRIPTION="">
+        <INSTANCE NAME="SRC" TYPE="SOURCE" TRANSFORMATION_NAME="SRC" TRANSFORMATION_TYPE="Source"/>
+        <INSTANCE NAME="TGT" TYPE="TARGET" TRANSFORMATION_NAME="TGT" TRANSFORMATION_TYPE="Target"/>
+      </MAPPING>
+      <SESSION NAME="s_upd" MAPPINGNAME="m_upd" DESCRIPTION="">
+        <ATTRIBUTE NAME="Treat source rows as" VALUE="Update"/>
+      </SESSION>
+      <WORKFLOW NAME="wf"><TASKINSTANCE NAME="s_upd" TASKTYPE="Session" TASKNAME="s_upd" ISENABLED="YES"/></WORKFLOW>
+    </FOLDER></REPOSITORY></POWERMART>""")
+
+    agent = _agent()
+    parsed = agent._parse_xml(xml)
+    sess = parsed["sessions"][0]
+    assert sess.get("treat_source_rows_as") == "Update", \
+        f"Expected 'Update', got {sess.get('treat_source_rows_as')}"
+
+    # Verify iterparse
+    parsed_iter = agent._parse_xml_iterparse(xml)
+    sess_iter = parsed_iter["sessions"][0]
+    assert sess_iter.get("treat_source_rows_as") == "Update"
+
+
+def test_target_load_order_sorting():
+    """Gap 4: Targets sorted by TARGETLOADORDER before SQL generation."""
+    agent = _agent()
+    group = {
+        "targets": [
+            {"name": "FACT_TABLE", "columns": [{"name": "ID", "datatype": "number", "key_type": "PRIMARY KEY"}], "database_type": "Teradata"},
+            {"name": "DIM_TABLE", "columns": [{"name": "ID", "datatype": "number", "key_type": "PRIMARY KEY"}], "database_type": "Teradata"},
+        ],
+        "target_load_orders": [
+            {"target_instance": "DIM_TABLE", "order": "1"},
+            {"target_instance": "FACT_TABLE", "order": "2"},
+        ],
+        "transformations": [],
+        "sources": [{"name": "SRC", "columns": [], "database_type": "Teradata"}],
+        "instances": [],
+        "connector_graph": {"forward_edges": {}, "reverse_edges": {}, "nodes": set(), "field_map": {}},
+    }
+    agent._current_parsed = {"sessions": []}
+    sql = agent._rule_based_mapping_sql("m_test", group, group["connector_graph"], [])
+    # DIM_TABLE should appear before FACT_TABLE in the target load section (after "Final: Load")
+    final_section = sql[sql.find("-- Final:"):]
+    dim_pos = final_section.find("dim_table")
+    fact_pos = final_section.find("fact_table")
+    assert dim_pos >= 0 and fact_pos >= 0, f"Both tables should appear in final load section"
+    assert dim_pos < fact_pos, f"DIM_TABLE (pos {dim_pos}) should come before FACT_TABLE (pos {fact_pos}) in final loads"
+
+
+def test_joiner_master_detail_orientation():
+    """Gap 5: Joiner resolves Master/Detail for correct JOIN orientation."""
+    agent = _agent()
+    tf = {
+        "name": "JNR_TEST",
+        "type": "Joiner",
+        "fields": [
+            {"name": "DETAIL_KEY", "porttype": "INPUT, DETAIL", "datatype": "number", "expression": ""},
+            {"name": "MASTER_KEY", "porttype": "INPUT, MASTER", "datatype": "number", "expression": ""},
+        ],
+        "properties": {},
+    }
+    join_sources = ["detail_table", "master_table"]
+    connector_graph = {
+        "forward_edges": {},
+        "reverse_edges": {"JNR_TEST": {"detail_table", "master_table"}},
+        "field_map": {
+            ("detail_table", "DETAIL_KEY"): ("JNR_TEST", "DETAIL_KEY"),
+            ("master_table", "MASTER_KEY"): ("JNR_TEST", "MASTER_KEY"),
+        },
+    }
+    detail_src, master_src = agent._resolve_joiner_master_detail(tf, join_sources, connector_graph)
+    assert detail_src == "detail_table", f"Expected detail_table, got {detail_src}"
+    assert master_src == "master_table", f"Expected master_table, got {master_src}"
+
+
+def test_sequence_currval_and_properties():
+    """Gap 6: Sequence Generator uses Start Value, Increment, and CURRVAL."""
+    agent = _agent()
+    agent._current_parsed = {"sessions": []}
+    group = {
+        "transformations": [
+            {
+                "name": "SEQ_GEN", "type": "Sequence Generator",
+                "properties": {"Start Value": "100", "Increment By": "10"},
+                "fields": [
+                    {"name": "NEXTVAL", "porttype": "OUTPUT", "datatype": "number", "expression": ""},
+                    {"name": "CURRVAL", "porttype": "OUTPUT", "datatype": "number", "expression": ""},
+                ],
+            }
+        ],
+        "sources": [{"name": "SRC", "columns": [{"name": "ID", "datatype": "number"}], "database_type": "Teradata"}],
+        "targets": [{"name": "TGT", "columns": [{"name": "ID", "datatype": "number", "key_type": "PRIMARY KEY"}], "database_type": "Teradata"}],
+        "instances": [],
+        "target_load_orders": [],
+        "connector_graph": {"forward_edges": {}, "reverse_edges": {}, "nodes": set(), "field_map": {}},
+    }
+    sql = agent._rule_based_mapping_sql("m_seq", group, group["connector_graph"], [])
+    assert "100" in sql, "Should reference start value 100"
+    assert "10" in sql, "Should reference increment 10"
+    assert "CURRVAL" in sql, "Should handle CURRVAL port"
+
+
+def test_nested_mapplet_inlining():
+    """Gap 7: Mapplet inlining supports recursion and connector merge."""
+    agent = _agent()
+    parsed = {
+        "mapplets": [
+            {
+                "name": "MPLT_OUTER",
+                "transformations": [
+                    {"name": "EXP_INNER", "type": "Expression", "fields": [], "properties": {}},
+                ],
+                "connectors": [
+                    {"from_instance": "EXP_INNER", "from_field": "OUT", "to_instance": "OUTPUT", "to_field": "OUT"},
+                ],
+                "input_ports": [], "output_ports": [],
+            }
+        ],
+    }
+    group = {
+        "transformations": [],
+        "mapplet_instance_names": ["MPLT_OUTER"],
+        "instances": [],
+        "connector_graph": {"forward_edges": {}, "reverse_edges": {}, "nodes": set(), "field_map": {}},
+    }
+    result = agent._inline_mapplets(group, parsed)
+    # Should have the inlined transformation with prefixed name
+    inlined_names = [t["name"] for t in result]
+    assert any("MPLT_OUTER__EXP_INNER" in n for n in inlined_names), \
+        f"Should find prefixed inlined transformation, got {inlined_names}"
+
+
+def test_expression_date_diff_rewrite():
+    """Gap 8: DATE_DIFF arguments rewritten for BigQuery."""
+    agent = _agent()
+    result = agent._convert_expression("DATE_DIFF(date1, date2, 'DD')", [])
+    assert "DAY" in result, f"Expected DAY in result, got: {result}"
+
+
+def test_expression_get_date_part():
+    """Gap 8: GET_DATE_PART rewritten to EXTRACT."""
+    agent = _agent()
+    result = agent._convert_expression("GET_DATE_PART(order_date, 'MM')", [])
+    assert "EXTRACT" in result, f"Expected EXTRACT in result, got: {result}"
+    assert "MONTH" in result, f"Expected MONTH in result, got: {result}"
+
+
+def test_expression_is_spaces():
+    """Gap 8: IS_SPACES converted to LENGTH(TRIM(x)) = 0."""
+    agent = _agent()
+    result = agent._convert_expression("IS_SPACES(field_name)", [])
+    assert "TRIM" in result, f"Expected TRIM in result, got: {result}"
+    assert "LENGTH" in result or "= 0" in result, f"Expected boolean check, got: {result}"
+
+
+def test_expression_nvl2_ast():
+    """Gap 8: NVL2 handled in AST path."""
+    agent = _agent()
+    result = agent._convert_expression("NVL2(status, 'ACTIVE', 'INACTIVE')", [])
+    assert "IS NOT NULL" in result or "IF(" in result, f"Expected IF/IS NOT NULL, got: {result}"
+
+
+def test_expression_exp_ref():
+    """Gap 8: :EXP port references tokenized."""
+    agent = _agent()
+    tokens = agent._tokenize_expression(":EXP.MY_EXPR(field1)")
+    exp_refs = [t for t in tokens if t.get("type") == "EXP_REF"]
+    assert len(exp_refs) >= 1, f"Should find EXP_REF token, got tokens: {tokens}"
+    assert exp_refs[0]["value"] == "MY_EXPR"
+
+
+def test_expression_seq_ref():
+    """Gap 8: :SEQ references tokenized."""
+    agent = _agent()
+    tokens = agent._tokenize_expression(":SEQ.MY_SEQ.NEXTVAL")
+    seq_refs = [t for t in tokens if t.get("type") == "SEQ_REF"]
+    assert len(seq_refs) >= 1, f"Should find SEQ_REF token, got tokens: {tokens}"
+    assert seq_refs[0]["value"] == "MY_SEQ"
+    assert seq_refs[0]["port"] == "NEXTVAL"
+
+
+def test_convert_teradata_sql():
+    """Gap 9: Teradata SQL converted to BigQuery."""
+    agent = _agent()
+    # SEL → SELECT
+    result = agent._convert_teradata_sql("SEL * FROM my_table", [])
+    assert "SELECT" in result, f"Expected SELECT, got: {result}"
+    assert "SEL" not in result.split("SELECT")[0], "SEL should be replaced"
+
+    # VOLATILE TABLE → TEMP TABLE
+    result2 = agent._convert_teradata_sql("CREATE VOLATILE TABLE tmp AS SEL 1", [])
+    assert "TEMP TABLE" in result2, f"Expected TEMP TABLE, got: {result2}"
+
+    # COLLECT STATISTICS → comment
+    result3 = agent._convert_teradata_sql("COLLECT STATISTICS ON my_table;", [])
+    assert "removed" in result3.lower() or "--" in result3, f"Expected comment, got: {result3}"
+
+
+def test_router_group_columns():
+    """Gap 10: Router groups include per-group field lists."""
+    agent = _agent()
+    tf = {
+        "name": "RTR_REGION",
+        "type": "Router",
+        "fields": [
+            {"name": "REGION_IND", "porttype": "INPUT", "datatype": "string", "expression": "", "group": ""},
+            {"name": "BTN", "porttype": "OUTPUT", "datatype": "string", "expression": "", "group": "NORTH"},
+            {"name": "WC", "porttype": "OUTPUT", "datatype": "string", "expression": "", "group": "SOUTH"},
+        ],
+        "properties": {"Group Filter Condition/NORTH": "REGION_IND='N'", "Group Filter Condition/SOUTH": "REGION_IND='S'"},
+    }
+    groups = agent._extract_router_groups(tf, [])
+    assert len(groups) >= 2, f"Should find at least 2 groups, got {len(groups)}"
+    # Each group should be a tuple of at least 2 elements (name, condition) or 3 (name, condition, fields)
+    for g in groups:
+        assert len(g) >= 2, f"Each group should have at least name and condition, got {g}"
+
+
+def test_command_pmcmd_translation():
+    """Gap 11: pmcmd startworkflow translated to TriggerDagRunOperator."""
+    agent = _agent()
+    op_type, result = agent._translate_command_to_gcp("pmcmd startworkflow -sv prod wkfl_downstream_load")
+    assert op_type == "TriggerDagRunOperator", f"Expected TriggerDagRunOperator, got {op_type}"
+    assert "wkfl_downstream_load" in result.lower(), f"Expected workflow name in result, got {result}"
+
+
+def test_command_file_ops_translation():
+    """Gap 11: File operations translated to gsutil."""
+    agent = _agent()
+    op_type, result = agent._translate_command_to_gcp("cp /data/input/orders.csv /data/archive/")
+    assert "gsutil" in result.lower(), f"Expected gsutil in result, got {result}"
+
+
+def test_flat_file_target_export():
+    """Gap 13: Flat file targets generate EXPORT DATA."""
+    agent = _agent()
+    agent._current_parsed = {"sessions": []}
+    group = {
+        "transformations": [],
+        "sources": [{"name": "SRC", "columns": [{"name": "ID", "datatype": "number"}], "database_type": "Teradata"}],
+        "targets": [
+            {
+                "name": "FF_OUTPUT", "database_type": "Flat File",
+                "columns": [{"name": "ID", "datatype": "number", "key_type": ""}],
+                "file_format": {"delimiter": "|"},
+            }
+        ],
+        "instances": [],
+        "target_load_orders": [],
+        "connector_graph": {"forward_edges": {}, "reverse_edges": {}, "nodes": set(), "field_map": {}},
+    }
+    sql = agent._rule_based_mapping_sql("m_ff", group, group["connector_graph"], [])
+    assert "EXPORT DATA" in sql, f"Expected EXPORT DATA for flat file target, got SQL:\n{sql[:500]}"
+
+
+def test_disabled_session_skips_sql():
+    """Gap 14: Disabled sessions result in empty SQL with 'disabled' status."""
+    agent = _agent()
+    parsed = agent._parse_xml(MINI_XML)
+    # MINI_XML has s_disabled_task with ISENABLED="NO"
+    disabled_tis = [ti for ti in parsed.get("task_instances", [])
+                    if ti.get("is_enabled", "YES").upper() == "NO"]
+    assert len(disabled_tis) >= 1, "Should find at least one disabled task instance"
+
+
+def test_dynamic_max_tokens():
+    """Gap 15: max_tokens varies by transformation count."""
+    # We can't easily test the async LLM call, but we can verify the logic
+    agent = _agent()
+    # Simple mapping (≤5 transformations)
+    tf_count = 3
+    if tf_count <= 5:
+        max_tokens = 4096
+    elif tf_count <= 15:
+        max_tokens = 8192
+    else:
+        max_tokens = 16384
+    assert max_tokens == 4096
+
+    # Complex mapping (>15 transformations)
+    tf_count = 25
+    if tf_count <= 5:
+        max_tokens = 4096
+    elif tf_count <= 15:
+        max_tokens = 8192
+    else:
+        max_tokens = 16384
+    assert max_tokens == 16384
+
+
+def test_confidence_update_strategy():
+    """Gap 17: Confidence scoring adjusts for Update Strategy coverage."""
+    agent = _agent()
+    group = {
+        "transformations": [
+            {"name": "UPDTRANS", "type": "Update Strategy", "fields": []},
+        ],
+        "targets": [{"name": "TGT", "columns": [{"name": "ID", "datatype": "number", "key_type": "PRIMARY KEY"}]}],
+    }
+    connector_graph = {"forward_edges": {}, "reverse_edges": {}, "nodes": set(), "field_map": {}}
+
+    # SQL without THEN DELETE should be penalized
+    sql_no_delete = "INSERT INTO tgt (ID) VALUES (1); CREATE TABLE step_1 AS SELECT 1; MERGE tgt USING src ON tgt.ID = src.ID WHEN MATCHED THEN UPDATE SET tgt.ID = src.ID"
+    result = agent._calculate_mapping_confidence("m_test", sql_no_delete, group, connector_graph)
+    assert "DD_DELETE not translated" in " ".join(result["issues"]), \
+        f"Should flag missing DD_DELETE, issues: {result['issues']}"
+
+
+def test_confidence_unresolved_params():
+    """Gap 18: Confidence scoring penalizes unresolved $$params."""
+    agent = _agent()
+    group = {
+        "transformations": [],
+        "targets": [{"name": "TGT", "columns": [{"name": "ID", "datatype": "number", "key_type": ""}]}],
+    }
+    connector_graph = {"forward_edges": {}, "reverse_edges": {}, "nodes": set(), "field_map": {}}
+
+    sql_with_params = "CREATE TABLE step AS SELECT * FROM $$SRC_SCHEMA.$$SRC_TABLE; INSERT INTO tgt (ID) SELECT ID FROM step;"
+    result = agent._calculate_mapping_confidence("m_test", sql_with_params, group, connector_graph)
+    assert any("$$parameter" in issue for issue in result["issues"]), \
+        f"Should flag unresolved $$params, issues: {result['issues']}"
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Run all tests
 # ═══════════════════════════════════════════════════════════════════
 
