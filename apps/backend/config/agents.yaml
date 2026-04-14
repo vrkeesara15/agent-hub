@@ -34,3 +34,12 @@ agents:
       migrations_today: 12
       transformations_converted: 87
       scd_patterns_detected: 9
+
+  - name: Message Code Builder
+    slug: message-code-builder
+    description: Accelerate message code development by intelligently matching requirements to existing templates, generating SQL and Airflow DAGs, and building a knowledge layer for the team.
+    status: active
+    stats:
+      templates_available: 5
+      codes_generated: 0
+      knowledge_entries: 0

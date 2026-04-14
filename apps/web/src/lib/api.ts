@@ -168,3 +168,69 @@ export async function generateDAG(description: string) {
     body: JSON.stringify({ description }),
   });
 }
+
+// --- Message Code Builder ---
+
+export async function getMessageCodeTemplates() {
+  return fetchAPI<{ templates: import('./types').MessageCodeTemplate[] }>(
+    '/api/agents/message-code-builder/templates',
+  );
+}
+
+export async function analyzeMessageCodeRequirements(
+  requirements: import('./types').MessageCodeRequirements,
+) {
+  return fetchAPI<import('./types').MessageCodeAnalyzeResponse>(
+    '/api/agents/message-code-builder/analyze',
+    {
+      method: 'POST',
+      body: JSON.stringify(requirements),
+    },
+  );
+}
+
+export async function generateMessageCode(
+  requirements: import('./types').MessageCodeRequirements,
+  templateId?: string,
+) {
+  return fetchAPI<import('./types').MessageCodeGenerateResponse>(
+    '/api/agents/message-code-builder/generate',
+    {
+      method: 'POST',
+      body: JSON.stringify({ requirements, template_id: templateId }),
+    },
+  );
+}
+
+export async function generateMessageCodeDAG(
+  requirements: import('./types').MessageCodeRequirements,
+) {
+  return fetchAPI<import('./types').MessageCodeDAGResponse>(
+    '/api/agents/message-code-builder/dag',
+    {
+      method: 'POST',
+      body: JSON.stringify(requirements),
+    },
+  );
+}
+
+export async function saveMessageCodeToKnowledge(data: {
+  message_code: string;
+  name: string;
+  description: string;
+  channel: string;
+  category: string;
+  owner: string;
+  schedule: string;
+  sql: string;
+  logic_summary: string;
+  tags: string[];
+}) {
+  return fetchAPI<import('./types').MessageCodeSaveResponse>(
+    '/api/agents/message-code-builder/save',
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    },
+  );
+}

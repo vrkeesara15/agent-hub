@@ -212,3 +212,69 @@ export interface NLToDAGResponse {
   filename: string;
   error?: string;
 }
+
+// --- Message Code Builder ---
+
+export interface MessageCodeRequirements {
+  message_code: string;
+  name: string;
+  description: string;
+  channel: string;
+  category: string;
+  owner: string;
+  schedule: string;
+  audience_rules: string;
+  exclusion_rules: string;
+  extra_fields: string;
+}
+
+export interface MessageCodeTemplate {
+  id: string;
+  name: string;
+  category: string;
+  channel: string;
+  description: string;
+  tags: string[];
+  logic_summary?: string;
+  sql?: string;
+}
+
+export interface MessageCodeAnalyzeResponse {
+  recommended_template: MessageCodeTemplate;
+  alternatives: {
+    id: string;
+    name: string;
+    category: string;
+    channel: string;
+    description: string;
+    relevance: string;
+  }[];
+  match_reasoning: string;
+}
+
+export interface MessageCodeChange {
+  section: string;
+  description: string;
+}
+
+export interface MessageCodeGenerateResponse {
+  sql: string;
+  changes: MessageCodeChange[];
+  logic_summary: string;
+  warnings: string[];
+  template_used: string;
+  template_name: string;
+}
+
+export interface MessageCodeDAGResponse {
+  dag_code: string;
+  dag_id: string;
+  cron: string;
+  filename: string;
+}
+
+export interface MessageCodeSaveResponse {
+  saved: boolean;
+  id: string;
+  total_templates: number;
+}
