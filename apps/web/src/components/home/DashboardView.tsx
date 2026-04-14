@@ -35,11 +35,23 @@ function MonitorIcon() {
   );
 }
 
+function MessageIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2563EB" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <polyline points="14 2 14 8 20 8"/>
+      <line x1="16" y1="13" x2="8" y2="13"/>
+      <line x1="16" y1="17" x2="8" y2="17"/>
+      <polyline points="10 9 9 9 8 9"/>
+    </svg>
+  );
+}
+
 export function DashboardView() {
   return (
     <div className="space-y-8">
       {/* Agent Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <AgentCard
           title="Object Iq"
           href="/agents/source-of-truth"
@@ -98,6 +110,28 @@ export function DashboardView() {
               <p className="text-xs text-text-muted font-medium">Pipelines:</p>
               <p className="text-2xl font-bold text-text-primary">47</p>
             </div>
+          </div>
+        </AgentCard>
+
+        <AgentCard
+          title="Message Code Builder"
+          href="/agents/message-code-builder"
+          icon={<MessageIcon />}
+          status="active"
+        >
+          <div className="flex flex-wrap gap-2">
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
+              Template Match
+            </span>
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
+              SQL Gen
+            </span>
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
+              DAG Gen
+            </span>
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border border-surface-border text-text-secondary">
+              Knowledge
+            </span>
           </div>
         </AgentCard>
       </div>

@@ -143,3 +143,36 @@ class InformaticaMigrateRequest(BaseModel):
 
 class NLToDAGRequest(BaseModel):
     description: str
+
+
+# --- Message Code Builder ---
+
+class MessageCodeRequirements(BaseModel):
+    message_code: str = "MC_NEW_MESSAGE"
+    name: str = "New Message"
+    description: str = ""
+    channel: str = "email"
+    category: str = ""
+    owner: str = "team"
+    schedule: str = "Daily 08:00 UTC"
+    audience_rules: str = ""
+    exclusion_rules: str = ""
+    extra_fields: str = ""
+
+
+class MessageCodeGenerateRequest(BaseModel):
+    requirements: MessageCodeRequirements
+    template_id: Optional[str] = None
+
+
+class MessageCodeSaveRequest(BaseModel):
+    message_code: str
+    name: str
+    description: str = ""
+    channel: str = "email"
+    category: str = ""
+    owner: str = ""
+    schedule: str = ""
+    sql: str = ""
+    logic_summary: str = ""
+    tags: list[str] = []
