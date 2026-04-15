@@ -171,6 +171,12 @@ export async function generateDAG(description: string) {
 
 // --- Message Code Builder ---
 
+export async function getMessageCodeDemoPresets() {
+  return fetchAPI<{ presets: Record<string, Partial<import('./types').MessageCodeRequirements>> }>(
+    '/api/agents/message-code-builder/demo-presets',
+  );
+}
+
 export async function getMessageCodeTemplates() {
   return fetchAPI<{ templates: import('./types').MessageCodeTemplate[] }>(
     '/api/agents/message-code-builder/templates',

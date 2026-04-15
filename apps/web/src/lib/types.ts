@@ -216,6 +216,71 @@ export interface NLToDAGResponse {
 // --- Message Code Builder ---
 
 export interface MessageCodeRequirements {
+  // Basic Info
+  campaign_manager_name: string;
+  message_code_type: string;
+  message_positioning: string;
+  refresh_frequency: string;
+  message_codes: string;
+  campaign_name: string;
+  date_of_request: string;
+  requested_due_date: string;
+
+  // Product Info
+  vz_service_type: string;
+  product_family: string;
+  offer_level: string;
+  product_description: string;
+  product_owner: string;
+
+  // Business Rules
+  employees_included: string;
+  dnsst_suppression: string;
+  suppress_maine: string;
+  maine_flag: string;
+  feed_cards_live_tiles: string;
+  intended_purpose: string;
+  expected_kpi: string;
+  target_criteria: string;
+  suppressions: string;
+  additional_info: string;
+
+  // Holdout & Control
+  holdout_group: string;
+  control_pct: string;
+
+  // Compliance
+  legal_approver: string;
+  legally_approved: string;
+  approval_date: string;
+  viva_data: string;
+  viva_jira_number: string;
+  viva_privacy_legal_approved: string;
+  cpni_data_used: string;
+  cpni_usage_type: string;
+  ppi_data: string;
+  ppi_usage_type: string;
+  model_criteria_used: string;
+
+  // CDAE Internal
+  mc_developer: string;
+  dev_start_date: string;
+  completion_date: string;
+  validation_send_date: string;
+  validation_due_date: string;
+  production_date: string;
+  log_check: string;
+  new_message_codes: string;
+  total_message_codes: string;
+  scope: string;
+  dbm_comments: string;
+  mvp_prioritization: string;
+  preliminary_counts: string;
+  script_name: string;
+  automation_folder: string;
+  development_scope: string;
+
+  // Legacy compat (used by template engine)
   message_code: string;
   name: string;
   description: string;

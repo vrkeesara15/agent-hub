@@ -10,302 +10,555 @@ from agents.base import BaseAgent
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Sample message code templates (placeholder — replace with real SQL files)
+# Real message code templates from production SQL files
 # ---------------------------------------------------------------------------
+_SQL_PRD_NO_CLOUD_NO_PPLAN_P = r"""-- =================================================================================================
+-- Description:       Generates Message Codes by creating several temporary tables to segment
+--                    customers and applying business rules before inserting the final codes
+--                    into the message table.
+--
+-- Script Name:       PRD_NO_CLOUD_NO_PPLAN_P.sql
+-- DAG Name:          dg_k45v_msgcdo_prd_no_cloud_no_pplan_p
+-- Schedule:          0 6 * * *
+--
+-- Message Codes:     PRD_NO_CLOUD_NO_PPLAN_P
+--
+-- Tags:              lob:vcg, program:mrktg, sub_lob:marketing
+--
+-- Labels:            task_type: bq_to_bq_load
+--                    car_team: home
+--                    service: wireless-wireline
+--                    type: product_enablement
+--
+-- Author:            chima7y (mark chiles)
+-- Create Date:       2025-11-24
+-- =================================================================================================
+BEGIN
+/*== INSERT RECORDS INTO VALIDATION TABLE ==*/
+BEGIN
+  INSERT INTO {{params.k45v_msgcdo}}.ntl_prd_qmtbls.prod_message_cd_validation
+    (identity_col_index, loadstarttime, insert_dt, message_cd, mc_owner, mc_owner_email, loadflag, prodflag)
+    SELECT NULL AS identity_col_index, CURRENT_DATETIME() AS loadstarttime, current_date(),
+        message_xref.message_cd, message_xref.mc_owner, message_xref.mc_owner_email, 'N' AS loadflag, 'N' AS prodflag
+      FROM {{params.k3av_scrbdo}}.k45v_msgcdo_0_msgcd_ref_tbls.message_xref
+      WHERE message_xref.message_cd IN('PRD_NO_CLOUD_NO_PPLAN_P', 'PRD_CLOUD_600GB_MYPLAN_P', 'PRD_NO_CLOUD_SUB_MYPLAN_P');
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== CREATE MAIN TABLE OF DECISION-MAKERS ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp1 AS
+    SELECT a.cust_id, a.acct_num, a.cust_line_seq_id, a.mtn_role, a.primary_line_ind,
+           'N' AS phog, 'N' AS myplan_cust, 'N' AS cloud_600gb,
+           'N' AS cloud_sfo_supp, 'N' AS cloud_spo_supp, 'N' AS cloud_cust
+      FROM {{params.gsyv_adcpdo}}.vzw_dmbm_vws.customer_profile_univ_cons_mini AS a
+      INNER JOIN {{params.gk1v_do}}.ntl_prd_allvm.cust_acct_line_v AS e
+        ON a.cust_id = e.cust_id AND a.acct_num = e.acct_num AND a.cust_line_seq_id = e.cust_line_seq_id
+      WHERE upper(a.consumer_ind) = 'Y'
+        AND upper(coalesce(e.prepaid_ind, 'N')) = 'N'
+        AND upper(a.dont_mrkt_bb_ind) = 'N'
+        AND upper(a.dnsst_ind) = 'N'
+        AND a.mtn_status_ind IN('A', 'S')
+        AND (upper(a.mtn_role) = 'AH' OR upper(a.primary_line_ind) = 'Y');
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== IDENTIFY CLOUD_SFO ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp2 AS
+    SELECT a.cust_id, a.acct_num, a.svc_id
+      FROM {{params.gk1v_do}}.ntl_prd_allvm.dly_service_activity_v AS a
+      WHERE a.svc_id IN('75527','75528','75529','75530','75531','75532','79814','85128','85548','85551','85553',
+        '86210','86211','86212','86213','87260','87264','87481','88132','88133','88134','88158',
+        '88920','88929','88930','88932','89090','89091','89573','89729','90081','90312','90317')
+        AND a.svc_act_dt <= current_date()
+        AND (a.svc_deact_dt >= current_date() OR a.svc_deact_dt IS NULL)
+      QUALIFY row_number() OVER (PARTITION BY a.cust_id, a.acct_num ORDER BY a.svc_act_dt DESC) = 1;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== IDENTIFY CLOUD_SPO ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp3 AS
+    SELECT a.cust_id, a.acct_num, a.cust_line_seq_id, a.svc_prod_id
+      FROM {{params.gk1v_do}}.ntl_prd_allvm.cust_acct_line_svc_prod_tran_v AS a
+      WHERE a.svc_prod_id IN('1577','1657','2630','3198','3199','3316')
+        AND a.svc_prod_eff_dt <= current_date()
+        AND a.svc_prod_exp_dt > current_date()
+        AND (a.svc_prod_deact_dt > current_date() OR a.svc_prod_deact_dt IS NULL)
+      QUALIFY row_number() OVER (PARTITION BY a.cust_id, a.acct_num, a.svc_prod_id ORDER BY a.svc_prod_id DESC) = 1;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== IDENTIFY MYPLAN_CUST ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp4 AS
+    SELECT a.cust_id, a.acct_num, b.pplan_cd
+      FROM {{params.gsyv_adcpdo}}.vzw_dmbm_vws_v.customer_profile_univ_cons_mini AS a
+      LEFT JOIN {{params.gk1v_do}}.ntl_prd_allvm.cust_acct_line_pplan_v AS b ON a.cust_id = b.cust_id
+      WHERE b.pplan_cd IN('63214','63215','63216','63217','69183','69185','32066')
+      QUALIFY row_number() OVER (PARTITION BY a.cust_id, a.acct_num ORDER BY a.cust_id) = 1;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== FLAG CLOUD_SFO_SUPP IN MAIN TABLE ==*/
+BEGIN
+  UPDATE tmp1 AS a SET cloud_sfo_supp = 'Y' FROM (
+    SELECT tmp2.cust_id, tmp2.acct_num FROM tmp2 GROUP BY 1, 2
+  ) AS b WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== FLAG CLOUD_SPO_SUPP IN MAIN TABLE ==*/
+BEGIN
+  UPDATE tmp1 AS a SET cloud_spo_supp = 'Y' FROM (
+    SELECT tmp3.cust_id, tmp3.acct_num FROM tmp3 GROUP BY 1, 2
+  ) AS b WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== FLAG MYPLAN_CUST IN MAIN TABLE ==*/
+BEGIN
+  UPDATE tmp1 AS a SET myplan_cust = 'Y' FROM (
+    SELECT tmp4.cust_id, tmp4.acct_num FROM tmp4 GROUP BY 1, 2
+  ) AS b WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== FLAG CLOUD_600GB IN MAIN TABLE ==*/
+BEGIN
+  UPDATE tmp1 AS a SET cloud_600gb = 'Y' FROM (
+    SELECT tmp2.cust_id, tmp2.acct_num FROM tmp2
+      WHERE rtrim(tmp2.svc_id, ' ') IN('85548','85551','88158','87481','86211','699952','699953')
+      GROUP BY 1, 2
+  ) AS b WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== Identify PHOG Records ==*/
+BEGIN
+  UPDATE tmp1 AS a SET phog = 'Y'
+    FROM {{params.gk1v_do}}.udm_prdusr_allvm.crm_cust_acct_phog_v AS b
+    WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== Assign Message Code ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp5 CLUSTER BY message_cd AS
+    SELECT 'V' AS sor_id, tmp1.cust_id, tmp1.cust_line_seq_id,
+           current_date() AS eff_dt, DATE '9999-12-31' AS exp_dt, 'C' AS curr_prev_ind,
+           tmp1.acct_num,
+           CAST(datetime(current_date(), time_trunc(current_time(), SECOND)) AS TIMESTAMP) AS insert_timestamp,
+           CASE WHEN upper(tmp1.phog) = 'Y' THEN 'P' ELSE 'T' END AS trtmnt_ctrl_ind,
+           message_cd AS message_cd, 'I' AS action_cd, 'U' AS src_load_id
+      FROM tmp1
+      CROSS JOIN UNNEST(ARRAY[
+        CASE
+          WHEN upper(rtrim(tmp1.cloud_spo_supp, ' ')) = 'N'
+           AND upper(rtrim(tmp1.cloud_sfo_supp, ' ')) = 'N'
+           AND upper(rtrim(tmp1.myplan_cust, ' ')) = 'N' THEN 'PRD_NO_CLOUD_NO_PPLAN_P'
+          WHEN upper(rtrim(tmp1.cloud_600gb, ' ')) = 'Y'
+           AND upper(rtrim(tmp1.myplan_cust, ' ')) = 'Y' THEN 'PRD_CLOUD_600GB_MYPLAN_P'
+          WHEN upper(rtrim(tmp1.cloud_spo_supp, ' ')) = 'N'
+           AND upper(rtrim(tmp1.cloud_sfo_supp, ' ')) = 'N'
+           AND upper(rtrim(tmp1.myplan_cust, ' ')) = 'Y' THEN 'PRD_NO_CLOUD_SUB_MYPLAN_P'
+          ELSE NULL
+        END
+      ]) AS message_cd
+      WHERE message_cd IS NOT NULL
+      QUALIFY row_number() OVER (PARTITION BY tmp1.cust_id, tmp1.acct_num ORDER BY tmp1.cust_id) = 1;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== Insert Records into staging table ==*/
+BEGIN
+  INSERT INTO {{params.k3av_scrbdo}}.k45v_msgcdo_0_msgcd_ref_tbls.cust_acct_line_message_manual
+    (sor_id, cust_id, cust_line_seq_id, eff_dt, exp_dt, curr_prev_ind, acct_num, message_cd,
+     insert_timestamp, trtmnt_ctrl_ind, action_cd, src_load_id)
+    SELECT tmp5.sor_id, tmp5.cust_id, tmp5.cust_line_seq_id, tmp5.eff_dt, tmp5.exp_dt,
+           tmp5.curr_prev_ind, tmp5.acct_num, tmp5.message_cd,
+           CURRENT_DATETIME() AS insert_timestamp, tmp5.trtmnt_ctrl_ind, 'U' AS action_cd, tmp5.src_load_id
+      FROM tmp5;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== Calc new counts for Validation table ==*/
+BEGIN
+  UPDATE {{params.k45v_msgcdo}}.ntl_prd_qmtbls.prod_message_cd_validation AS a
+    SET loadflag = 'Y', loadendtime = current_datetime(), loadphog = b.loadphog, loadtreat = b.loadtreat
+    FROM (
+      SELECT xx.message_cd, sum(xx.lp) AS loadphog, sum(xx.ltr) AS loadtreat
+        FROM (
+          SELECT cust_acct_line_message_manual.message_cd,
+            CASE WHEN upper(cust_acct_line_message_manual.trtmnt_ctrl_ind) = 'P' THEN 1 ELSE 0 END AS lp,
+            CASE WHEN upper(cust_acct_line_message_manual.trtmnt_ctrl_ind) = 'T' THEN 1 ELSE 0 END AS ltr
+            FROM {{params.k3av_scrbdo}}.k45v_msgcdo_0_msgcd_ref_tbls.cust_acct_line_message_manual
+            WHERE cust_acct_line_message_manual.message_cd IN(
+              'PRD_NO_CLOUD_NO_PPLAN_P', 'PRD_CLOUD_600GB_MYPLAN_P', 'PRD_NO_CLOUD_SUB_MYPLAN_P')
+        ) AS xx GROUP BY 1
+    ) AS b
+    WHERE a.message_cd IN('PRD_NO_CLOUD_NO_PPLAN_P', 'PRD_CLOUD_600GB_MYPLAN_P', 'PRD_NO_CLOUD_SUB_MYPLAN_P')
+      AND a.message_cd = b.message_cd AND insert_dt = current_date() AND upper(loadflag) = 'N';
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+RETURN;
+END;
+"""
+
+_SQL_PRD_NO_CLOUD_NO_PPLAN_600GB_P = r"""-- =================================================================================================
+-- Description:       Generates Message Codes by creating several temporary tables to segment
+--                    customers and applying business rules before inserting the final codes
+--                    into the message table.  (600GB variant)
+--
+-- Script Name:       PRD_NO_CLOUD_NO_PPLAN_600GB_P.sql
+-- DAG Name:          dg_k45v_msgcdo_prd_no_cloud_no_pplan_p
+-- Schedule:          0 6 * * *
+--
+-- Message Codes:     PRD_NO_CLOUD_NO_PPLAN_P (600GB variant)
+--
+-- Tags:              lob:vcg, program:mrktg, sub_lob:marketing
+--
+-- Labels:            task_type: bq_to_bq_load
+--                    car_team: home
+--                    service: wireless-wireline
+--                    type: product_enablement
+--
+-- Author:            chima7y (mark chiles)
+-- Create Date:       2025-11-24
+-- =================================================================================================
+BEGIN
+/*== INSERT RECORDS INTO VALIDATION TABLE ==*/
+BEGIN
+  INSERT INTO {{params.k45v_msgcdo}}.ntl_prd_qmtbls.prod_message_cd_validation
+    (identity_col_index, loadstarttime, insert_dt, message_cd, mc_owner, mc_owner_email, loadflag, prodflag)
+    SELECT NULL AS identity_col_index, CURRENT_DATETIME() AS loadstarttime, current_date(),
+        message_xref.message_cd, message_xref.mc_owner, message_xref.mc_owner_email, 'N' AS loadflag, 'N' AS prodflag
+      FROM {{params.k3av_scrbdo}}.k45v_msgcdo_0_msgcd_ref_tbls.message_xref
+      WHERE message_xref.message_cd IN('PRD_NO_CLOUD_NO_PPLAN_P', 'PRD_CLOUD_600GB_MYPLAN_P', 'PRD_NO_CLOUD_SUB_MYPLAN_P');
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== CREATE MAIN TABLE OF DECISION-MAKERS ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp1 AS
+    SELECT a.cust_id, a.acct_num, a.cust_line_seq_id, a.mtn_role, a.primary_line_ind,
+           'N' AS phog, 'N' AS myplan_cust, 'N' AS cloud_600gb,
+           'N' AS cloud_sfo_supp, 'N' AS cloud_spo_supp, 'N' AS cloud_cust
+      FROM {{params.gsyv_adcpdo}}.vzw_dmbm_vws.customer_profile_univ_cons_mini AS a
+      INNER JOIN {{params.gk1v_do}}.ntl_prd_allvm.cust_acct_line_v AS e
+        ON a.cust_id = e.cust_id AND a.acct_num = e.acct_num AND a.cust_line_seq_id = e.cust_line_seq_id
+      WHERE upper(a.consumer_ind) = 'Y'
+        AND upper(coalesce(e.prepaid_ind, 'N')) = 'N'
+        AND upper(a.dont_mrkt_bb_ind) = 'N'
+        AND upper(a.dnsst_ind) = 'N'
+        AND a.mtn_status_ind IN('A', 'S')
+        AND (upper(a.mtn_role) = 'AH' OR upper(a.primary_line_ind) = 'Y');
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== IDENTIFY CLOUD_SFO ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp2 AS
+    SELECT a.cust_id, a.acct_num, a.svc_id
+      FROM {{params.gk1v_do}}.ntl_prd_allvm.dly_service_activity_v AS a
+      WHERE a.svc_id IN('75527','75528','75529','75530','75531','75532','79814','85128','85548','85551','85553',
+        '86210','86211','86212','86213','87260','87264','87481','88132','88133','88134','88158',
+        '88920','88929','88930','88932','89090','89091','89573','89729','90081','90312','90317')
+        AND a.svc_act_dt <= current_date()
+        AND (a.svc_deact_dt >= current_date() OR a.svc_deact_dt IS NULL)
+      QUALIFY row_number() OVER (PARTITION BY a.cust_id, a.acct_num ORDER BY a.svc_act_dt DESC) = 1;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== IDENTIFY CLOUD_SPO ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp3 AS
+    SELECT a.cust_id, a.acct_num, a.cust_line_seq_id, a.svc_prod_id
+      FROM {{params.gk1v_do}}.ntl_prd_allvm.cust_acct_line_svc_prod_tran_v AS a
+      WHERE a.svc_prod_id IN('1577','1657','2630','3198','3199','3316')
+        AND a.svc_prod_eff_dt <= current_date()
+        AND a.svc_prod_exp_dt > current_date()
+        AND (a.svc_prod_deact_dt > current_date() OR a.svc_prod_deact_dt IS NULL)
+      QUALIFY row_number() OVER (PARTITION BY a.cust_id, a.acct_num, a.svc_prod_id ORDER BY a.svc_prod_id DESC) = 1;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== IDENTIFY MYPLAN_CUST ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp4 AS
+    SELECT a.cust_id, a.acct_num, b.pplan_cd
+      FROM {{params.gsyv_adcpdo}}.vzw_dmbm_vws_v.customer_profile_univ_cons_mini AS a
+      LEFT JOIN {{params.gk1v_do}}.ntl_prd_allvm.cust_acct_line_pplan_v AS b ON a.cust_id = b.cust_id
+      WHERE b.pplan_cd IN('63214','63215','63216','63217','69183','69185','32066')
+      QUALIFY row_number() OVER (PARTITION BY a.cust_id, a.acct_num ORDER BY a.cust_id) = 1;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== FLAG CLOUD_SFO_SUPP IN MAIN TABLE ==*/
+BEGIN
+  UPDATE tmp1 AS a SET cloud_sfo_supp = 'Y' FROM (
+    SELECT tmp2.cust_id, tmp2.acct_num FROM tmp2 GROUP BY 1, 2
+  ) AS b WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== FLAG CLOUD_SPO_SUPP IN MAIN TABLE ==*/
+BEGIN
+  UPDATE tmp1 AS a SET cloud_spo_supp = 'Y' FROM (
+    SELECT tmp3.cust_id, tmp3.acct_num FROM tmp3 GROUP BY 1, 2
+  ) AS b WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== FLAG MYPLAN_CUST IN MAIN TABLE ==*/
+BEGIN
+  UPDATE tmp1 AS a SET myplan_cust = 'Y' FROM (
+    SELECT tmp4.cust_id, tmp4.acct_num FROM tmp4 GROUP BY 1, 2
+  ) AS b WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== FLAG CLOUD_600GB IN MAIN TABLE ==*/
+BEGIN
+  UPDATE tmp1 AS a SET cloud_600gb = 'Y' FROM (
+    SELECT tmp2.cust_id, tmp2.acct_num FROM tmp2
+      WHERE rtrim(tmp2.svc_id, ' ') IN('85548','85551','88158','87481','86211','699952','699953')
+      GROUP BY 1, 2
+  ) AS b WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== Identify PHOG Records ==*/
+BEGIN
+  UPDATE tmp1 AS a SET phog = 'Y'
+    FROM {{params.gk1v_do}}.udm_prdusr_allvm.crm_cust_acct_phog_v AS b
+    WHERE a.cust_id = b.cust_id AND a.acct_num = b.acct_num;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== Assign Message Code ==*/
+BEGIN
+  CREATE TEMPORARY TABLE tmp5 CLUSTER BY message_cd AS
+    SELECT 'V' AS sor_id, tmp1.cust_id, tmp1.cust_line_seq_id,
+           current_date() AS eff_dt, DATE '9999-12-31' AS exp_dt, 'C' AS curr_prev_ind,
+           tmp1.acct_num, CURRENT_DATETIME() AS insert_timestamp,
+           CASE WHEN upper(tmp1.phog) = 'Y' THEN 'P' ELSE 'T' END AS trtmnt_ctrl_ind,
+           message_cd AS message_cd, 'I' AS action_cd, 'U' AS src_load_id
+      FROM tmp1
+      CROSS JOIN UNNEST(ARRAY[
+        CASE
+          WHEN upper(rtrim(tmp1.cloud_spo_supp, ' ')) = 'N'
+           AND upper(rtrim(tmp1.cloud_sfo_supp, ' ')) = 'N'
+           AND upper(rtrim(tmp1.myplan_cust, ' ')) = 'N' THEN 'PRD_NO_CLOUD_NO_PPLAN_P'
+          WHEN upper(rtrim(tmp1.cloud_600gb, ' ')) = 'Y'
+           AND upper(rtrim(tmp1.myplan_cust, ' ')) = 'Y' THEN 'PRD_CLOUD_600GB_MYPLAN_P'
+          WHEN upper(rtrim(tmp1.cloud_spo_supp, ' ')) = 'N'
+           AND upper(rtrim(tmp1.cloud_sfo_supp, ' ')) = 'N'
+           AND upper(rtrim(tmp1.myplan_cust, ' ')) = 'Y' THEN 'PRD_NO_CLOUD_SUB_MYPLAN_P'
+          ELSE NULL
+        END
+      ]) AS message_cd
+      WHERE message_cd IS NOT NULL
+      QUALIFY row_number() OVER (PARTITION BY tmp1.cust_id, tmp1.acct_num ORDER BY tmp1.cust_id) = 1;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== Insert Records into staging table ==*/
+BEGIN
+  INSERT INTO {{params.k3av_scrbdo}}.k45v_msgcdo_0_msgcd_ref_tbls.cust_acct_line_message_manual
+    (sor_id, cust_id, cust_line_seq_id, eff_dt, exp_dt, curr_prev_ind, acct_num, message_cd,
+     insert_timestamp, trtmnt_ctrl_ind, action_cd, src_load_id)
+    SELECT tmp5.sor_id, tmp5.cust_id, tmp5.cust_line_seq_id, tmp5.eff_dt, tmp5.exp_dt,
+           tmp5.curr_prev_ind, tmp5.acct_num, tmp5.message_cd,
+           CURRENT_DATETIME() AS insert_timestamp, tmp5.trtmnt_ctrl_ind, 'U' AS action_cd, tmp5.src_load_id
+      FROM tmp5;
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+/*== Calc new counts for Validation table ==*/
+BEGIN
+  UPDATE {{params.k45v_msgcdo}}.ntl_prd_qmtbls.prod_message_cd_validation AS a
+    SET loadflag = 'Y', loadendtime = current_datetime(), loadphog = b.loadphog, loadtreat = b.loadtreat
+    FROM (
+      SELECT xx.message_cd, sum(xx.lp) AS loadphog, sum(xx.ltr) AS loadtreat
+        FROM (
+          SELECT cust_acct_line_message_manual.message_cd,
+            CASE WHEN upper(cust_acct_line_message_manual.trtmnt_ctrl_ind) = 'P' THEN 1 ELSE 0 END AS lp,
+            CASE WHEN upper(cust_acct_line_message_manual.trtmnt_ctrl_ind) = 'T' THEN 1 ELSE 0 END AS ltr
+            FROM {{params.k3av_scrbdo}}.k45v_msgcdo_0_msgcd_ref_tbls.cust_acct_line_message_manual
+            WHERE cust_acct_line_message_manual.message_cd IN(
+              'PRD_NO_CLOUD_NO_PPLAN_P', 'PRD_CLOUD_600GB_MYPLAN_P', 'PRD_NO_CLOUD_SUB_MYPLAN_P')
+        ) AS xx GROUP BY 1
+    ) AS b
+    WHERE a.message_cd IN('PRD_NO_CLOUD_NO_PPLAN_P', 'PRD_CLOUD_600GB_MYPLAN_P', 'PRD_NO_CLOUD_SUB_MYPLAN_P')
+      AND a.message_cd = b.message_cd AND insert_dt = current_date() AND upper(loadflag) = 'N';
+EXCEPTION WHEN ERROR THEN RAISE USING MESSAGE = FORMAT('Query failed: %s | Statement: %s', @@error.message, @@error.statement_text);
+END;
+
+RETURN;
+END;
+"""
+
+
 SAMPLE_TEMPLATES: list[dict] = [
     {
-        "id": "mc_welcome_email",
-        "name": "Welcome Email",
-        "category": "email",
-        "channel": "email",
-        "description": "Sends a welcome email to newly registered users within 24 hours of signup.",
-        "sql": """-- Message Code: MC_WELCOME_EMAIL
--- Description: Welcome email for new user registrations
--- Owner: marketing-team
--- Schedule: Daily 08:00 UTC
-
-WITH new_users AS (
-    SELECT
-        u.user_id,
-        u.email,
-        u.first_name,
-        u.last_name,
-        u.registration_date,
-        u.preferred_language,
-        u.country_code
-    FROM `project.dataset.dim_users` u
-    WHERE u.registration_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
-      AND u.registration_date < CURRENT_DATE()
-      AND u.email_opt_in = TRUE
-      AND u.is_active = TRUE
-),
-
-exclusions AS (
-    SELECT DISTINCT user_id
-    FROM `project.dataset.message_log`
-    WHERE message_code = 'MC_WELCOME_EMAIL'
-      AND send_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-)
-
-SELECT
-    nu.user_id,
-    nu.email,
-    nu.first_name,
-    nu.last_name,
-    nu.preferred_language,
-    nu.country_code,
-    'MC_WELCOME_EMAIL' AS message_code,
-    CURRENT_TIMESTAMP() AS created_at
-FROM new_users nu
-LEFT JOIN exclusions ex ON nu.user_id = ex.user_id
-WHERE ex.user_id IS NULL;
-""",
-        "tags": ["onboarding", "new-user", "email", "welcome"],
-        "logic_summary": "Selects new users from last 24h who have email opt-in, excludes anyone already sent this message in 30 days.",
+        "id": "prd_no_cloud_no_pplan_p",
+        "name": "PRD No Cloud No PPlan (Proactive)",
+        "category": "product_enablement",
+        "channel": "proactive",
+        "description": "Targets consumer customers who do not have cloud products and are not on a myPlan price plan. Assigns message codes for product enablement marketing.",
+        "sql": _SQL_PRD_NO_CLOUD_NO_PPLAN_P,
+        "tags": ["vcg", "marketing", "product_enablement", "wireless-wireline", "home", "no-cloud", "no-pplan", "proactive"],
+        "logic_summary": (
+            "1. Build base of consumer decision-makers (AH or primary line, active/suspended, non-prepaid, DNSST=N). "
+            "2. Identify Cloud SFO subscribers via dly_service_activity_v service IDs. "
+            "3. Identify Cloud SPO subscribers via cust_acct_line_svc_prod_tran_v product IDs. "
+            "4. Identify myPlan customers via pplan_cd list. "
+            "5. Flag cloud_sfo_supp, cloud_spo_supp, myplan_cust, cloud_600gb, and PHOG in main table. "
+            "6. Assign message codes: PRD_NO_CLOUD_NO_PPLAN_P (no cloud, no pplan), "
+            "PRD_CLOUD_600GB_MYPLAN_P (600gb cloud + myplan), "
+            "PRD_NO_CLOUD_SUB_MYPLAN_P (no cloud + myplan). "
+            "7. Insert into staging table with PHOG-based treatment control (P=holdout, T=treatment). "
+            "8. Update validation table with load counts."
+        ),
     },
     {
-        "id": "mc_cart_abandon",
-        "name": "Cart Abandonment Reminder",
-        "category": "remarketing",
-        "channel": "email",
-        "description": "Sends a cart abandonment reminder after 2 hours of inactivity.",
-        "sql": """-- Message Code: MC_CART_ABANDON
--- Description: Cart abandonment reminder email
--- Owner: growth-team
--- Schedule: Every 2 hours
-
-WITH abandoned_carts AS (
-    SELECT
-        c.user_id,
-        c.cart_id,
-        c.created_at AS cart_created,
-        c.total_amount,
-        c.item_count,
-        u.email,
-        u.first_name,
-        u.preferred_language
-    FROM `project.dataset.fact_carts` c
-    JOIN `project.dataset.dim_users` u ON c.user_id = u.user_id
-    WHERE c.status = 'abandoned'
-      AND c.updated_at <= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 HOUR)
-      AND c.updated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-      AND c.total_amount > 0
-      AND u.email_opt_in = TRUE
-),
-
-recent_purchases AS (
-    SELECT DISTINCT user_id
-    FROM `project.dataset.fact_orders`
-    WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
-),
-
-exclusions AS (
-    SELECT DISTINCT user_id
-    FROM `project.dataset.message_log`
-    WHERE message_code = 'MC_CART_ABANDON'
-      AND send_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
-)
-
-SELECT
-    ac.user_id,
-    ac.email,
-    ac.first_name,
-    ac.cart_id,
-    ac.total_amount,
-    ac.item_count,
-    ac.preferred_language,
-    'MC_CART_ABANDON' AS message_code,
-    CURRENT_TIMESTAMP() AS created_at
-FROM abandoned_carts ac
-LEFT JOIN recent_purchases rp ON ac.user_id = rp.user_id
-LEFT JOIN exclusions ex ON ac.user_id = ex.user_id
-WHERE rp.user_id IS NULL
-  AND ex.user_id IS NULL;
-""",
-        "tags": ["cart", "abandonment", "remarketing", "email"],
-        "logic_summary": "Finds carts abandoned 2-24h ago with amount > 0, excludes recent purchasers and users messaged in last 3 days.",
-    },
-    {
-        "id": "mc_push_promo",
-        "name": "Promotional Push Notification",
-        "category": "promotion",
-        "channel": "push",
-        "description": "Sends a promotional push notification to eligible users for a campaign.",
-        "sql": """-- Message Code: MC_PUSH_PROMO
--- Description: Promotional push notification for active campaigns
--- Owner: campaigns-team
--- Schedule: Campaign-based trigger
-
-WITH eligible_users AS (
-    SELECT
-        u.user_id,
-        u.device_token,
-        u.first_name,
-        u.preferred_language,
-        u.country_code,
-        u.user_segment,
-        s.last_active_date
-    FROM `project.dataset.dim_users` u
-    JOIN `project.dataset.user_sessions` s ON u.user_id = s.user_id
-    WHERE u.push_opt_in = TRUE
-      AND u.is_active = TRUE
-      AND u.device_token IS NOT NULL
-      AND s.last_active_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-),
-
-campaign_targets AS (
-    SELECT
-        campaign_id,
-        target_segment,
-        target_countries,
-        start_date,
-        end_date
-    FROM `project.dataset.dim_campaigns`
-    WHERE status = 'active'
-      AND CURRENT_DATE() BETWEEN start_date AND end_date
-),
-
-exclusions AS (
-    SELECT DISTINCT user_id
-    FROM `project.dataset.message_log`
-    WHERE channel = 'push'
-      AND send_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
-)
-
-SELECT
-    eu.user_id,
-    eu.device_token,
-    eu.first_name,
-    eu.preferred_language,
-    ct.campaign_id,
-    'MC_PUSH_PROMO' AS message_code,
-    CURRENT_TIMESTAMP() AS created_at
-FROM eligible_users eu
-CROSS JOIN campaign_targets ct
-LEFT JOIN exclusions ex ON eu.user_id = ex.user_id
-WHERE ex.user_id IS NULL
-  AND eu.user_segment IN UNNEST(SPLIT(ct.target_segment, ','))
-  AND eu.country_code IN UNNEST(SPLIT(ct.target_countries, ','));
-""",
-        "tags": ["push", "promotion", "campaign", "notification"],
-        "logic_summary": "Targets push-opted-in users active in 30 days matching campaign segment/country, limits to 1 push per day.",
-    },
-    {
-        "id": "mc_sms_otp",
-        "name": "SMS OTP Verification",
-        "category": "transactional",
-        "channel": "sms",
-        "description": "Sends OTP verification SMS for high-value transactions.",
-        "sql": """-- Message Code: MC_SMS_OTP
--- Description: OTP verification for high-value transactions
--- Owner: security-team
--- Schedule: Real-time trigger
-
-WITH pending_verifications AS (
-    SELECT
-        v.verification_id,
-        v.user_id,
-        v.transaction_id,
-        v.transaction_amount,
-        v.requested_at,
-        u.phone_number,
-        u.country_code
-    FROM `project.dataset.fact_verifications` v
-    JOIN `project.dataset.dim_users` u ON v.user_id = u.user_id
-    WHERE v.status = 'pending'
-      AND v.requested_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 5 MINUTE)
-      AND v.transaction_amount >= 500
-      AND u.phone_number IS NOT NULL
-      AND u.sms_opt_in = TRUE
-),
-
-rate_limit AS (
-    SELECT user_id, COUNT(*) AS sms_count
-    FROM `project.dataset.message_log`
-    WHERE message_code = 'MC_SMS_OTP'
-      AND send_date = CURRENT_DATE()
-    GROUP BY user_id
-    HAVING sms_count >= 5
-)
-
-SELECT
-    pv.user_id,
-    pv.phone_number,
-    pv.verification_id,
-    pv.transaction_id,
-    pv.transaction_amount,
-    pv.country_code,
-    'MC_SMS_OTP' AS message_code,
-    CURRENT_TIMESTAMP() AS created_at
-FROM pending_verifications pv
-LEFT JOIN rate_limit rl ON pv.user_id = rl.user_id
-WHERE rl.user_id IS NULL;
-""",
-        "tags": ["sms", "otp", "verification", "transactional", "security"],
-        "logic_summary": "Sends OTP for transactions >= 500, rate limited to 5 SMS/day per user, only pending verifications from last 5 minutes.",
-    },
-    {
-        "id": "mc_reactivation",
-        "name": "User Reactivation Campaign",
-        "category": "lifecycle",
-        "channel": "email",
-        "description": "Re-engages dormant users who haven't been active in 30-90 days.",
-        "sql": """-- Message Code: MC_REACTIVATION
--- Description: Re-engagement email for dormant users
--- Owner: lifecycle-team
--- Schedule: Weekly Monday 10:00 UTC
-
-WITH dormant_users AS (
-    SELECT
-        u.user_id,
-        u.email,
-        u.first_name,
-        u.last_name,
-        u.preferred_language,
-        u.country_code,
-        s.last_active_date,
-        DATE_DIFF(CURRENT_DATE(), s.last_active_date, DAY) AS days_inactive,
-        u.lifetime_value
-    FROM `project.dataset.dim_users` u
-    JOIN `project.dataset.user_sessions` s ON u.user_id = s.user_id
-    WHERE u.email_opt_in = TRUE
-      AND u.is_active = TRUE
-      AND s.last_active_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
-                                  AND DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-),
-
-exclusions AS (
-    SELECT DISTINCT user_id
-    FROM `project.dataset.message_log`
-    WHERE message_code = 'MC_REACTIVATION'
-      AND send_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
-)
-
-SELECT
-    du.user_id,
-    du.email,
-    du.first_name,
-    du.last_name,
-    du.preferred_language,
-    du.country_code,
-    du.days_inactive,
-    du.lifetime_value,
-    CASE
-        WHEN du.lifetime_value >= 1000 THEN 'high_value'
-        WHEN du.lifetime_value >= 200 THEN 'medium_value'
-        ELSE 'low_value'
-    END AS user_tier,
-    'MC_REACTIVATION' AS message_code,
-    CURRENT_TIMESTAMP() AS created_at
-FROM dormant_users du
-LEFT JOIN exclusions ex ON du.user_id = ex.user_id
-WHERE ex.user_id IS NULL
-ORDER BY du.lifetime_value DESC;
-""",
-        "tags": ["reactivation", "lifecycle", "dormant", "email", "re-engagement"],
-        "logic_summary": "Targets users inactive 30-90 days with email opt-in, segments by lifetime value tier, excludes if messaged in 14 days.",
+        "id": "prd_no_cloud_no_pplan_600gb_p",
+        "name": "PRD No Cloud No PPlan 600GB (Proactive)",
+        "category": "product_enablement",
+        "channel": "proactive",
+        "description": "600GB variant of the no-cloud no-pplan message code. Same logic with 600GB-specific cloud service identification. Used for targeted product enablement marketing.",
+        "sql": _SQL_PRD_NO_CLOUD_NO_PPLAN_600GB_P,
+        "tags": ["vcg", "marketing", "product_enablement", "wireless-wireline", "home", "no-cloud", "600gb", "proactive"],
+        "logic_summary": (
+            "Same as PRD_NO_CLOUD_NO_PPLAN_P but with 600GB-specific variant. "
+            "1. Build consumer decision-maker base (AH/primary, active/suspended, non-prepaid, DNSST=N). "
+            "2-4. Identify Cloud SFO, Cloud SPO, and myPlan subscribers. "
+            "5. Flag all attributes including cloud_600gb via specific SVC_IDs (85548, 85551, etc.). "
+            "6. Assign codes based on cloud/pplan status combinations. "
+            "7. Insert into staging with PHOG treatment control. "
+            "8. Update validation counts."
+        ),
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Demo data: pre-filled form values based on the sample SQL templates
+# ---------------------------------------------------------------------------
+DEMO_PRESETS: dict[str, dict] = {
+    "prd_no_cloud_no_pplan_p": {
+        "campaign_manager_name": "Mark Chiles",
+        "message_code_type": "Message Code New",
+        "message_positioning": "Proactive (Home/Mobile)",
+        "refresh_frequency": "Daily",
+        "message_codes": "PRD_NO_CLOUD_NO_PPLAN_P, PRD_CLOUD_600GB_MYPLAN_P, PRD_NO_CLOUD_SUB_MYPLAN_P",
+        "campaign_name": "Product Enablement - No Cloud No PPlan",
+        "date_of_request": "2025-11-24",
+        "requested_due_date": "2025-12-01",
+        "vz_service_type": "Wireless-Wireline",
+        "product_family": "Cloud Storage / myPlan",
+        "offer_level": "Account",
+        "product_description": "Target consumers without cloud products or myPlan price plans for product enablement marketing. Segments customers by cloud SFO/SPO subscription status, myPlan enrollment, and 600GB cloud tier.",
+        "product_owner": "Mark Chiles",
+        "employees_included": "No",
+        "dnsst_suppression": "YES",
+        "suppress_maine": "No",
+        "maine_flag": "",
+        "feed_cards_live_tiles": "NO",
+        "intended_purpose": "Revenue Generating",
+        "expected_kpi": "Cloud product adoption rate, myPlan conversion rate, incremental ARPU from product enablement",
+        "target_criteria": "Consumer decision-makers (AH or primary line), active/suspended MTN status, non-prepaid, DNSST=N, DONT_MRKT_BB=N. Excludes customers with existing cloud SFO or SPO subscriptions for no-cloud codes.",
+        "suppressions": "Prepaid customers, DNSST flagged, Do Not Market BB flagged, non-consumer accounts",
+        "additional_info": "Script uses parameterized project spaces (k45v_msgcdo, k3av_scrbdo, gsyv_adcpdo, gk1v_do). DAG: dg_k45v_msgcdo_prd_no_cloud_no_pplan_p. Runs daily at 6 AM UTC.",
+        "holdout_group": "PHOG",
+        "control_pct": "0",
+        "legal_approver": "",
+        "legally_approved": "Yes",
+        "approval_date": "2025-11-20",
+        "viva_data": "No",
+        "cpni_data_used": "No",
+        "cpni_usage_type": "Not Used",
+        "ppi_data": "No",
+        "model_criteria_used": "No",
+        "mc_developer": "chima7y",
+        "dev_start_date": "2025-11-24",
+        "completion_date": "2025-12-17",
+        "production_date": "2025-12-18",
+        "log_check": "YES",
+        "new_message_codes": "PRD_NO_CLOUD_NO_PPLAN_P, PRD_CLOUD_600GB_MYPLAN_P, PRD_NO_CLOUD_SUB_MYPLAN_P",
+        "total_message_codes": "3",
+        "scope": "3",
+        "script_name": "PRD_NO_CLOUD_NO_PPLAN_P.sql",
+        "automation_folder": "dg_k45v_msgcdo_prd_no_cloud_no_pplan_p",
+        "development_scope": "Multiple channels with high effort selection criteria",
+        "message_code": "PRD_NO_CLOUD_NO_PPLAN_P",
+        "name": "Product Enablement - No Cloud No PPlan",
+        "description": "Target consumers without cloud products or myPlan price plans for product enablement marketing.",
+        "channel": "proactive",
+        "category": "product_enablement",
+        "owner": "chima7y (mark chiles)",
+        "schedule": "0 6 * * *",
+        "audience_rules": "Consumer decision-makers (AH or primary), active/suspended, non-prepaid, no DNSST, no Do-Not-Market-BB",
+        "exclusion_rules": "Exclude prepaid, DNSST, Do-Not-Market-BB",
+    },
+    "prd_no_cloud_no_pplan_600gb_p": {
+        "campaign_manager_name": "Mark Chiles",
+        "message_code_type": "Message Code New",
+        "message_positioning": "Proactive (Home/Mobile)",
+        "refresh_frequency": "Daily",
+        "message_codes": "PRD_NO_CLOUD_NO_PPLAN_P, PRD_CLOUD_600GB_MYPLAN_P, PRD_NO_CLOUD_SUB_MYPLAN_P",
+        "campaign_name": "Product Enablement - No Cloud No PPlan 600GB",
+        "date_of_request": "2025-11-24",
+        "requested_due_date": "2025-12-01",
+        "vz_service_type": "Wireless-Wireline",
+        "product_family": "Cloud Storage 600GB / myPlan",
+        "offer_level": "Account",
+        "product_description": "600GB variant targeting consumers without cloud products. Identifies 600GB cloud tier via specific service IDs (85548, 85551, 88158, 87481, 86211) for myPlan cross-sell enablement.",
+        "product_owner": "Mark Chiles",
+        "employees_included": "No",
+        "dnsst_suppression": "YES",
+        "suppress_maine": "No",
+        "maine_flag": "",
+        "feed_cards_live_tiles": "NO",
+        "intended_purpose": "Revenue Generating",
+        "expected_kpi": "600GB cloud tier adoption, myPlan conversion from 600GB subscribers",
+        "target_criteria": "Consumer decision-makers (AH or primary line), active/suspended, non-prepaid, DNSST=N. 600GB cloud identified via SVC_IDs: 85548, 85551, 88158, 87481, 86211, 699952, 699953.",
+        "suppressions": "Prepaid customers, DNSST flagged, Do Not Market BB flagged",
+        "additional_info": "Updated filename to PRD_NO_CLOUD_NO_PPLAN_600GB_P.sql to reflect 600GB message code changes. Same DAG as base variant.",
+        "holdout_group": "PHOG",
+        "control_pct": "0",
+        "legal_approver": "",
+        "legally_approved": "Yes",
+        "approval_date": "2025-11-20",
+        "viva_data": "No",
+        "cpni_data_used": "No",
+        "cpni_usage_type": "Not Used",
+        "ppi_data": "No",
+        "model_criteria_used": "No",
+        "mc_developer": "chima7y",
+        "dev_start_date": "2025-11-24",
+        "completion_date": "2026-01-14",
+        "production_date": "2026-01-16",
+        "log_check": "YES",
+        "new_message_codes": "PRD_NO_CLOUD_NO_PPLAN_P, PRD_CLOUD_600GB_MYPLAN_P, PRD_NO_CLOUD_SUB_MYPLAN_P",
+        "total_message_codes": "3",
+        "scope": "3",
+        "script_name": "PRD_NO_CLOUD_NO_PPLAN_600GB_P.sql",
+        "automation_folder": "dg_k45v_msgcdo_prd_no_cloud_no_pplan_p",
+        "development_scope": "Multiple channels with high effort selection criteria",
+        "message_code": "PRD_NO_CLOUD_NO_PPLAN_600GB_P",
+        "name": "Product Enablement - No Cloud No PPlan 600GB",
+        "description": "600GB variant targeting consumers without cloud products for product enablement.",
+        "channel": "proactive",
+        "category": "product_enablement",
+        "owner": "chima7y (mark chiles)",
+        "schedule": "0 6 * * *",
+        "audience_rules": "Consumer decision-makers (AH or primary), active/suspended, non-prepaid, no DNSST, no Do-Not-Market-BB. 600GB cloud via specific SVC_IDs.",
+        "exclusion_rules": "Exclude prepaid, DNSST, Do-Not-Market-BB",
+    },
+}
 
 # ---------------------------------------------------------------------------
 # In-memory knowledge base for created message codes
@@ -364,7 +617,10 @@ class MessageCodeBuilderAgent(BaseAgent):
 
         channel = (requirements.get("channel") or "").lower()
         category = (requirements.get("category") or "").lower()
-        description = (requirements.get("description") or "").lower()
+        description = (requirements.get("description") or requirements.get("product_description") or "").lower()
+        positioning = (requirements.get("message_positioning") or "").lower()
+        service_type = (requirements.get("vz_service_type") or "").lower()
+        target_criteria = (requirements.get("target_criteria") or requirements.get("audience_rules") or "").lower()
 
         scored: list[tuple[int, dict]] = []
         for t in templates:
@@ -374,16 +630,25 @@ class MessageCodeBuilderAgent(BaseAgent):
             t_tags = [tag.lower() for tag in (t.get("tags") or [])]
             t_desc = (t.get("description") or "").lower()
 
-            # Channel match is most important
+            # Channel / positioning match is most important
             if channel and channel == t_channel:
+                score += 40
+            if "proactive" in positioning and "proactive" in t_channel:
                 score += 40
 
             # Category match
             if category and category == t_category:
                 score += 30
 
-            # Keyword overlap from description
-            desc_words = set(re.findall(r'\w+', description))
+            # Service type / tag overlap
+            if service_type:
+                svc_words = set(re.findall(r'\w+', service_type))
+                svc_overlap = svc_words & set(t_tags)
+                score += len(svc_overlap) * 15
+
+            # Keyword overlap from description + target criteria
+            all_text = f"{description} {target_criteria}"
+            desc_words = set(re.findall(r'\w+', all_text))
             tag_overlap = desc_words & set(t_tags)
             desc_overlap = desc_words & set(re.findall(r'\w+', t_desc))
             score += len(tag_overlap) * 10
@@ -437,14 +702,20 @@ class MessageCodeBuilderAgent(BaseAgent):
 
     def _explain_match(self, requirements: dict, template: dict) -> str:
         reasons = []
-        if (requirements.get("channel") or "").lower() == (template.get("channel") or "").lower():
+        req_channel = (requirements.get("channel") or "").lower()
+        tmpl_channel = (template.get("channel") or "").lower()
+        if req_channel and req_channel == tmpl_channel:
             reasons.append(f"Same channel: {template.get('channel')}")
+        positioning = (requirements.get("message_positioning") or "").lower()
+        if "proactive" in positioning and "proactive" in tmpl_channel:
+            reasons.append(f"Positioning match: proactive")
         if (requirements.get("category") or "").lower() == (template.get("category") or "").lower():
             reasons.append(f"Same category: {template.get('category')}")
-        desc_words = set(re.findall(r'\w+', (requirements.get("description") or "").lower()))
+        desc_text = (requirements.get("description") or requirements.get("product_description") or "").lower()
+        desc_words = set(re.findall(r'\w+', desc_text))
         tag_overlap = desc_words & set(t.lower() for t in (template.get("tags") or []))
         if tag_overlap:
-            reasons.append(f"Matching tags: {', '.join(tag_overlap)}")
+            reasons.append(f"Matching tags: {', '.join(sorted(tag_overlap))}")
         if not reasons:
             reasons.append("Closest general match based on available templates")
         return "; ".join(reasons)
@@ -460,14 +731,14 @@ class MessageCodeBuilderAgent(BaseAgent):
         else:
             template = self._match_template(requirements)
 
-        msg_code = requirements.get("message_code", "MC_NEW_MESSAGE")
-        msg_name = requirements.get("name", "New Message")
-        owner = requirements.get("owner", "team")
-        schedule = requirements.get("schedule", "Daily 08:00 UTC")
-        channel = requirements.get("channel", "email")
-        description = requirements.get("description", "")
-        audience_rules = requirements.get("audience_rules", "")
-        exclusion_rules = requirements.get("exclusion_rules", "")
+        msg_code = requirements.get("message_code") or requirements.get("message_codes", "").split(",")[0].strip() or "MC_NEW_MESSAGE"
+        msg_name = requirements.get("name") or requirements.get("campaign_name") or "New Message"
+        owner = requirements.get("owner") or requirements.get("product_owner") or requirements.get("campaign_manager_name") or "team"
+        schedule = requirements.get("schedule", "0 6 * * *")
+        channel = requirements.get("channel") or requirements.get("message_positioning", "proactive").split("(")[0].strip().lower() or "email"
+        description = requirements.get("description") or requirements.get("product_description") or ""
+        audience_rules = requirements.get("audience_rules") or requirements.get("target_criteria") or ""
+        exclusion_rules = requirements.get("exclusion_rules") or requirements.get("suppressions") or ""
         extra_fields = requirements.get("extra_fields", "")
 
         # Try LLM for intelligent generation
@@ -567,11 +838,11 @@ class MessageCodeBuilderAgent(BaseAgent):
 
     def generate_dag(self, requirements: dict) -> dict:
         """Generate an Airflow DAG for the message code."""
-        msg_code = requirements.get("message_code", "MC_NEW_MESSAGE")
-        dag_id = msg_code.lower().replace("mc_", "msg_")
-        owner = requirements.get("owner", "data-team")
-        schedule = requirements.get("schedule", "Daily 08:00 UTC")
-        description = requirements.get("description", "")
+        msg_code = requirements.get("message_code") or requirements.get("message_codes", "").split(",")[0].strip() or "MC_NEW_MESSAGE"
+        dag_id = f"dg_k45v_msgcdo_{msg_code.lower()}"
+        owner = requirements.get("owner") or requirements.get("product_owner") or requirements.get("campaign_manager_name") or "data-team"
+        schedule = requirements.get("schedule", "0 6 * * *")
+        description = requirements.get("description") or requirements.get("product_description") or ""
 
         # Convert schedule to cron expression
         cron = self._schedule_to_cron(schedule)
