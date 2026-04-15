@@ -82,6 +82,25 @@ async def generate_dag(request: MessageCodeRequirements):
     return result
 
 
+@router.post("/api/agents/message-code-builder/erules")
+async def generate_erules(request: MessageCodeRequirements):
+    """Generate eRules output (General, Rule, CDP Select, eRule JSON) for the message code."""
+    agent = MessageCodeBuilderAgent()
+    result = agent.generate_erules(request.model_dump())
+
+    from main import activity_log
+    activity_log.append({
+        "id": str(uuid.uuid4())[:8],
+        "agent": "Message Code Builder",
+        "message": f"Generated eRules for target {result.get('target_id', 'unknown')}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    if len(activity_log) > 50:
+        activity_log[:] = activity_log[-50:]
+
+    return result
+
+
 @router.get("/api/agents/message-code-builder/demo-presets")
 async def get_demo_presets():
     """Return demo preset data for auto-populating the form during demos."""

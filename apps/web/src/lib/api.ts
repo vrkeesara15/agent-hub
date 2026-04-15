@@ -171,6 +171,18 @@ export async function generateDAG(description: string) {
 
 // --- Message Code Builder ---
 
+export async function generateMessageCodeERules(
+  requirements: import('./types').MessageCodeRequirements,
+) {
+  return fetchAPI<import('./types').ERuleResponse>(
+    '/api/agents/message-code-builder/erules',
+    {
+      method: 'POST',
+      body: JSON.stringify(requirements),
+    },
+  );
+}
+
 export async function getMessageCodeDemoPresets() {
   return fetchAPI<{ presets: Record<string, Partial<import('./types').MessageCodeRequirements>> }>(
     '/api/agents/message-code-builder/demo-presets',

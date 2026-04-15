@@ -953,6 +953,250 @@ with DAG(
             return "0 8 * * *"
         return "0 8 * * *"
 
+    def generate_erules(self, requirements: dict) -> dict:
+        """Generate eRules output (General, Rule, CDP Select, eRule JSON) from requirements."""
+        msg_code = (
+            requirements.get("message_code")
+            or requirements.get("message_codes", "").split(",")[0].strip()
+            or "MC_NEW_MESSAGE"
+        )
+        campaign_name = requirements.get("campaign_name") or requirements.get("name") or msg_code
+        description = requirements.get("description") or requirements.get("product_description") or ""
+        target_id = f"TG_{abs(hash(msg_code)) % 10000}"
+        base_universe = "Pricing Universe"
+        holdout = requirements.get("holdout_group", "BOTH")
+        dnsst = requirements.get("dnsst_suppression", "YES")
+        offer_level = requirements.get("offer_level", "Account")
+
+        # --- General tab ---
+        general = {
+            "name": msg_code,
+            "enabled": True,
+            "description": description or campaign_name,
+            "base": base_universe,
+            "target_id": target_id,
+            "campaign": campaign_name,
+            "pillars": ["Pricing", "Treatments", "Progi"],
+            "status": "Pending Update",
+            "audit_effective_date": "",
+            "include_target_groups": [],
+            "exclude_target_groups": [],
+        }
+
+        # --- Rule tab: build rules from the SQL template logic ---
+        rules = []
+        rule_idx = 1
+
+        # Consumer indicator
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "consumer_ind",
+            "operator": "=",
+            "value": "Y",
+            "root_level": offer_level,
+            "join": "AND",
+        })
+        rule_idx += 1
+
+        # Prepaid exclusion
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "prepaid_ind",
+            "operator": "=",
+            "value": "N",
+            "root_level": offer_level,
+            "join": "AND",
+        })
+        rule_idx += 1
+
+        # DNSST suppression
+        if dnsst == "YES":
+            rules.append({
+                "id": f"E{rule_idx}",
+                "variable": "dnsst_ind",
+                "operator": "=",
+                "value": "N",
+                "root_level": offer_level,
+                "join": "AND",
+            })
+            rule_idx += 1
+
+        # Do not market broadband
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "dont_mrkt_bb_ind",
+            "operator": "=",
+            "value": "N",
+            "root_level": offer_level,
+            "join": "AND",
+        })
+        rule_idx += 1
+
+        # MTN status
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "mtn_status_ind",
+            "operator": "in",
+            "value": "A | S",
+            "root_level": "Line",
+            "join": "AND",
+        })
+        rule_idx += 1
+
+        # MTN role / primary line
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "mtn_role",
+            "operator": "=",
+            "value": "AH",
+            "root_level": "Line",
+            "join": "OR",
+        })
+        rule_idx += 1
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "primary_line_ind",
+            "operator": "=",
+            "value": "Y",
+            "root_level": "Line",
+            "join": "AND",
+        })
+        rule_idx += 1
+
+        # Cloud SFO suppression (service IDs)
+        cloud_sfo_ids = (
+            "75527 | 75528 | 75529 | 75530 | 75531 | 75532 | 79814 | 85128 | 85548 | 85551 | 85553 | "
+            "86210 | 86211 | 86212 | 86213 | 87260 | 87264 | 87481 | 88132 | 88133 | 88134 | 88158 | "
+            "88920 | 88929 | 88930 | 88932 | 89090 | 89091 | 89573 | 89729 | 90081 | 90312 | 90317"
+        )
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "svc_id (cloud_sfo)",
+            "operator": "not in",
+            "value": cloud_sfo_ids,
+            "root_level": "Line",
+            "join": "AND",
+        })
+        rule_idx += 1
+
+        # Cloud SPO suppression (product IDs)
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "svc_prod_id (cloud_spo)",
+            "operator": "not in",
+            "value": "1577 | 1657 | 2630 | 3198 | 3199 | 3316",
+            "root_level": "Line",
+            "join": "AND",
+        })
+        rule_idx += 1
+
+        # myPlan suppression (pplan codes)
+        rules.append({
+            "id": f"E{rule_idx}",
+            "variable": "pplan_cd (myplan)",
+            "operator": "not in",
+            "value": "63214 | 63215 | 63216 | 63217 | 69183 | 69185 | 32066",
+            "root_level": "Line",
+            "join": "AND",
+        })
+        rule_idx += 1
+
+        # PHOG holdout
+        if holdout in ("PHOG", "BOTH"):
+            rules.append({
+                "id": f"E{rule_idx}",
+                "variable": "phog_flag",
+                "operator": "exists in",
+                "value": "crm_cust_acct_phog_v",
+                "root_level": offer_level,
+                "join": "AND",
+            })
+            rule_idx += 1
+
+        # --- CDP Select statement ---
+        cdp_select = (
+            f"SELECT\n"
+            f"  cust_id,\n"
+            f"  cust_line_seq_id,\n"
+            f"  acct_num,\n"
+            f"  mtn_role,\n"
+            f"  primary_line_ind\n"
+            f"FROM\n"
+            f"  customer_profile_univ_cons_mini\n"
+            f"WHERE consumer_ind = 'Y'\n"
+            f"  AND coalesce(prepaid_ind, 'N') = 'N'\n"
+            f"  AND dont_mrkt_bb_ind = 'N'\n"
+            f"  AND dnsst_ind = 'N'\n"
+            f"  AND mtn_status_ind IN ('A', 'S')\n"
+            f"  AND (mtn_role = 'AH' OR primary_line_ind = 'Y')\n"
+            f"  AND cust_id NOT IN (\n"
+            f"    SELECT cust_id FROM dly_service_activity_v WHERE svc_id IN (\n"
+            f"      '75527','75528','75529','75530','75531','75532','79814','85128',\n"
+            f"      '85548','85551','85553','86210','86211','86212','86213','87260',\n"
+            f"      '87264','87481','88132','88133','88134','88158','88920','88929',\n"
+            f"      '88930','88932','89090','89091','89573','89729','90081','90312','90317'\n"
+            f"    ) AND svc_act_dt <= CURRENT_DATE\n"
+            f"      AND (svc_deact_dt >= CURRENT_DATE OR svc_deact_dt IS NULL)\n"
+            f"  )\n"
+            f"  AND cust_id NOT IN (\n"
+            f"    SELECT cust_id FROM cust_acct_line_svc_prod_tran_v WHERE svc_prod_id IN (\n"
+            f"      '1577','1657','2630','3198','3199','3316'\n"
+            f"    ) AND svc_prod_eff_dt <= CURRENT_DATE AND svc_prod_exp_dt > CURRENT_DATE\n"
+            f"  )\n"
+            f"  AND cust_id NOT IN (\n"
+            f"    SELECT cust_id FROM cust_acct_line_pplan_v WHERE pplan_cd IN (\n"
+            f"      '63214','63215','63216','63217','69183','69185','32066'\n"
+            f"    )\n"
+            f"  )"
+        )
+
+        # --- eRule JSON (Page-a-Rule format) ---
+        sys_logic_parts = [f"TE1 AND ({' AND '.join(r['id'] for r in rules)})"]
+        pts_conditions = []
+
+        # Universe condition
+        pts_conditions.append({
+            "NBDSName": "NBR_TE_KAST",
+            "TS_HashUniversalId": "",
+            "TsyLabel": "0",
+            "TsyValue": f"universe.{base_universe.upper().replace(' ', '_')}",
+        })
+
+        # Test universe
+        pts_conditions.append({
+            "NBDSName": "NBR_TE_KAST",
+            "TS_HashUniversalId": "",
+            "TsyLabel": "0",
+            "TsyValue": f"universe.FTO2_TST_ACCTS_UNIVERSE_{target_id}",
+        })
+
+        # Rule conditions
+        for rule in rules:
+            op_map = {"=": "eq", "in": "in", "not in": "notIn", "exists in": "existsIn", "not exists in": "notExistsIn", "between": "between"}
+            pts_conditions.append({
+                "NBDSName": "NBR_TE_KXGF",
+                "sysInfo": f"InternalCDPWithoutbasicDP",
+                "TsyLabel": rule["id"],
+                "TsyValue": f"{rule['variable']}|{op_map.get(rule['operator'], rule['operator'])}|{rule['value']}",
+                "rootLevel": rule["root_level"],
+            })
+
+        erule_json = {
+            "id": target_id,
+            "sByRespStatusTxt": "Established",
+            "sByMeta": "",
+            "sysLogic": sys_logic_parts[0],
+            "PtsCondition": pts_conditions,
+        }
+
+        return {
+            "target_id": target_id,
+            "general": general,
+            "rules": rules,
+            "cdp_select": cdp_select,
+            "erule_json": erule_json,
+        }
+
     def list_templates(self) -> list[dict]:
         """List all available templates."""
         templates = self._get_all_templates()

@@ -343,3 +343,34 @@ export interface MessageCodeSaveResponse {
   id: string;
   total_templates: number;
 }
+
+export interface ERuleCondition {
+  id: string;
+  variable: string;
+  operator: string;
+  value: string;
+  root_level: string;
+  join: string;
+}
+
+export interface ERuleGeneral {
+  name: string;
+  enabled: boolean;
+  description: string;
+  base: string;
+  target_id: string;
+  campaign: string;
+  pillars: string[];
+  status: string;
+  audit_effective_date: string;
+  include_target_groups: string[];
+  exclude_target_groups: string[];
+}
+
+export interface ERuleResponse {
+  target_id: string;
+  general: ERuleGeneral;
+  rules: ERuleCondition[];
+  cdp_select: string;
+  erule_json: Record<string, unknown>;
+}

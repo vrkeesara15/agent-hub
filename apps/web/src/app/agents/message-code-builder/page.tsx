@@ -8,6 +8,7 @@ import {
   analyzeMessageCodeRequirements,
   generateMessageCode,
   generateMessageCodeDAG,
+  generateMessageCodeERules,
   saveMessageCodeToKnowledge,
   getMessageCodeDemoPresets,
 } from '@/lib/api';
@@ -16,6 +17,7 @@ import type {
   MessageCodeAnalyzeResponse,
   MessageCodeGenerateResponse,
   MessageCodeDAGResponse,
+  ERuleResponse,
 } from '@/lib/types';
 
 type Step = 'requirements' | 'template' | 'output';
@@ -102,10 +104,13 @@ export default function MessageCodeBuilderPage() {
     useState<MessageCodeGenerateResponse | null>(null);
   const [dagResult, setDagResult] =
     useState<MessageCodeDAGResponse | null>(null);
+  const [eRulesResult, setERulesResult] =
+    useState<ERuleResponse | null>(null);
 
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [dagLoading, setDagLoading] = useState(false);
+  const [eRulesLoading, setERulesLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,6 +172,7 @@ export default function MessageCodeBuilderPage() {
         const result = await generateMessageCode(requirements, templateId);
         setGenerateResult(result);
         setDagResult(null);
+        setERulesResult(null);
         setSaved(false);
         setStep('output');
       } catch (err) {
@@ -194,6 +200,21 @@ export default function MessageCodeBuilderPage() {
       );
     } finally {
       setDagLoading(false);
+    }
+  }, [requirements]);
+
+  const handleGenerateERules = useCallback(async () => {
+    setERulesLoading(true);
+    setError(null);
+    try {
+      const result = await generateMessageCodeERules(requirements);
+      setERulesResult(result);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to generate eRules',
+      );
+    } finally {
+      setERulesLoading(false);
     }
   }, [requirements]);
 
@@ -237,6 +258,7 @@ export default function MessageCodeBuilderPage() {
     setAnalysis(null);
     setGenerateResult(null);
     setDagResult(null);
+    setERulesResult(null);
     setSaved(false);
     setError(null);
   }, []);
@@ -355,10 +377,13 @@ export default function MessageCodeBuilderPage() {
         <GeneratedOutput
           result={generateResult}
           dagResult={dagResult}
+          eRulesResult={eRulesResult}
           onGenerateDAG={handleGenerateDAG}
+          onGenerateERules={handleGenerateERules}
           onSaveToKnowledge={handleSave}
           onStartOver={handleStartOver}
           dagLoading={dagLoading}
+          eRulesLoading={eRulesLoading}
           saveLoading={saveLoading}
           saved={saved}
           messageCode={requirements.message_code || requirements.message_codes.split(',')[0]?.trim() || 'message_code'}
