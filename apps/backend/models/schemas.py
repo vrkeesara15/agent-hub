@@ -148,13 +148,78 @@ class NLToDAGRequest(BaseModel):
 # --- Message Code Builder ---
 
 class MessageCodeRequirements(BaseModel):
-    message_code: str = "MC_NEW_MESSAGE"
-    name: str = "New Message"
+    # --- Basic Info ---
+    campaign_manager_name: str = ""
+    message_code_type: str = "Message Code New"  # Message Code New | Message Code Existing | DAC
+    message_positioning: str = "Proactive (Home/Mobile)"  # Proactive (Home/Mobile) | Reactive (Mobile) | DAC | CMID/SED (Mobile)
+    refresh_frequency: str = "Daily"  # Adhoc | Daily | Monthly | Weekly | Dynamic Audience Code
+    message_codes: str = ""  # the message code name(s)
+    campaign_name: str = ""
+    date_of_request: str = ""
+    requested_due_date: str = ""
+
+    # --- Product Info ---
+    vz_service_type: str = ""
+    product_family: str = ""
+    offer_level: str = "Account"  # Account | Line
+    product_description: str = ""
+    product_owner: str = ""
+
+    # --- Business Rules ---
+    employees_included: str = "No"  # Yes | No
+    dnsst_suppression: str = "YES"  # YES | No
+    suppress_maine: str = "No"  # Yes | No
+    maine_flag: str = ""  # Flag 1 BB | Flag 2 MB | Used in Customer Facing Channel
+    feed_cards_live_tiles: str = "NO"  # Yes-AAL_P | Yes-LOYALTY_PROMO_P | Yes-PROMO_PRICING_P | Yes-REV GEN_P | Yes-RIGHT_PRICING_P | Yes-UPGRADE_P | Home Mixed | Yes-PROD_P | NO
+    intended_purpose: str = ""  # Engagement | Revenue Generating | Stem Churn
+    expected_kpi: str = ""
+    target_criteria: str = ""
+    suppressions: str = ""
+    additional_info: str = ""
+
+    # --- Holdout & Control ---
+    holdout_group: str = "BOTH"  # CARHOG | PHOG | BOTH | CS_PHOG + PRS FIOS PHOG as OHOG | None
+    control_pct: str = "0"
+
+    # --- Compliance ---
+    legal_approver: str = ""
+    legally_approved: str = "Pending"  # Yes | No | Pending
+    approval_date: str = ""
+    viva_data: str = "No"  # Yes | No
+    viva_jira_number: str = ""
+    viva_privacy_legal_approved: str = "NA"  # Yes | No | Pending | NA
+    cpni_data_used: str = "No"  # Yes | No
+    cpni_usage_type: str = "Not Used"  # Not Used | Home Voice | Mobile
+    ppi_data: str = "No"  # Yes | No
+    ppi_usage_type: str = ""
+    model_criteria_used: str = "No"  # Yes | No | NA
+
+    # --- CDAE Internal ---
+    mc_developer: str = ""
+    dev_start_date: str = ""
+    completion_date: str = ""
+    validation_send_date: str = ""
+    validation_due_date: str = ""
+    production_date: str = ""
+    log_check: str = "YES"  # YES | No
+    new_message_codes: str = ""
+    total_message_codes: str = ""
+    scope: str = ""  # 1 | 2 | 3 | 4 | 5
+    dbm_comments: str = ""
+    mvp_prioritization: str = ""
+    preliminary_counts: str = ""
+    script_name: str = ""
+    automation_folder: str = ""
+    development_scope: str = ""
+
+    # Legacy compat fields (used by template matching / generation)
+    message_code: str = ""
+    name: str = ""
     description: str = ""
     channel: str = "email"
     category: str = ""
-    owner: str = "team"
-    schedule: str = "Daily 08:00 UTC"
+    owner: str = ""
+    schedule: str = "0 6 * * *"
     audience_rules: str = ""
     exclusion_rules: str = ""
     extra_fields: str = ""

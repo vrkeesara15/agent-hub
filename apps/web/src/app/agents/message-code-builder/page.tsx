@@ -1,7 +1,6 @@
 'use client';
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Breadcrumb } from '@/components/layout/Breadcrumb';
-import { Card } from '@/components/ui/Card';
 import { RequirementsForm } from '@/components/message-code-builder/RequirementsForm';
 import { TemplateReview } from '@/components/message-code-builder/TemplateReview';
 import { GeneratedOutput } from '@/components/message-code-builder/GeneratedOutput';
@@ -10,6 +9,7 @@ import {
   generateMessageCode,
   generateMessageCodeDAG,
   saveMessageCodeToKnowledge,
+  getMessageCodeDemoPresets,
 } from '@/lib/api';
 import type {
   MessageCodeRequirements,
@@ -21,13 +21,66 @@ import type {
 type Step = 'requirements' | 'template' | 'output';
 
 const INITIAL_REQUIREMENTS: MessageCodeRequirements = {
+  campaign_manager_name: '',
+  message_code_type: 'Message Code New',
+  message_positioning: 'Proactive (Home/Mobile)',
+  refresh_frequency: 'Daily',
+  message_codes: '',
+  campaign_name: '',
+  date_of_request: '',
+  requested_due_date: '',
+  vz_service_type: '',
+  product_family: '',
+  offer_level: 'Account',
+  product_description: '',
+  product_owner: '',
+  employees_included: 'No',
+  dnsst_suppression: 'YES',
+  suppress_maine: 'No',
+  maine_flag: '',
+  feed_cards_live_tiles: 'NO',
+  intended_purpose: '',
+  expected_kpi: '',
+  target_criteria: '',
+  suppressions: '',
+  additional_info: '',
+  holdout_group: 'BOTH',
+  control_pct: '0',
+  legal_approver: '',
+  legally_approved: 'Pending',
+  approval_date: '',
+  viva_data: 'No',
+  viva_jira_number: '',
+  viva_privacy_legal_approved: 'NA',
+  cpni_data_used: 'No',
+  cpni_usage_type: 'Not Used',
+  ppi_data: 'No',
+  ppi_usage_type: '',
+  model_criteria_used: 'No',
+  mc_developer: '',
+  dev_start_date: '',
+  completion_date: '',
+  validation_send_date: '',
+  validation_due_date: '',
+  production_date: '',
+  log_check: 'YES',
+  new_message_codes: '',
+  total_message_codes: '',
+  scope: '',
+  dbm_comments: '',
+  mvp_prioritization: '',
+  preliminary_counts: '',
+  script_name: '',
+  automation_folder: '',
+  development_scope: '',
+  // Legacy compat
   message_code: '',
   name: '',
   description: '',
   channel: 'email',
   category: '',
   owner: '',
-  schedule: 'Daily 08:00 UTC',
+  schedule: '0 6 * * *',
   audience_rules: '',
   exclusion_rules: '',
   extra_fields: '',
@@ -57,11 +110,44 @@ export default function MessageCodeBuilderPage() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Demo mode state
+  const [demoMode, setDemoMode] = useState(false);
+  const [demoPresets, setDemoPresets] = useState<Record<string, Partial<MessageCodeRequirements>> | null>(null);
+
+  // Load demo presets on mount
+  useEffect(() => {
+    getMessageCodeDemoPresets()
+      .then((data) => setDemoPresets(data.presets))
+      .catch(() => {
+        // silently fail - demo presets are optional
+      });
+  }, []);
+
+  const handleLoadDemo = useCallback(
+    (presetId: string) => {
+      if (!demoPresets || !demoPresets[presetId]) return;
+      const preset = demoPresets[presetId];
+      setRequirements({ ...INITIAL_REQUIREMENTS, ...preset } as MessageCodeRequirements);
+    },
+    [demoPresets],
+  );
+
   const handleAnalyze = useCallback(async () => {
     setAnalyzeLoading(true);
     setError(null);
     try {
-      const result = await analyzeMessageCodeRequirements(requirements);
+      // Sync legacy fields from the new form fields before submitting
+      const synced: MessageCodeRequirements = {
+        ...requirements,
+        message_code: requirements.message_codes.split(',')[0]?.trim() || requirements.message_codes,
+        name: requirements.campaign_name,
+        description: requirements.product_description,
+        owner: requirements.product_owner || requirements.campaign_manager_name,
+        audience_rules: requirements.target_criteria,
+        exclusion_rules: requirements.suppressions,
+      };
+      setRequirements(synced);
+      const result = await analyzeMessageCodeRequirements(synced);
       setAnalysis(result);
       setStep('template');
     } catch (err) {
@@ -117,18 +203,20 @@ export default function MessageCodeBuilderPage() {
     setError(null);
     try {
       await saveMessageCodeToKnowledge({
-        message_code: requirements.message_code,
-        name: requirements.name,
-        description: requirements.description,
+        message_code: requirements.message_code || requirements.message_codes,
+        name: requirements.campaign_name || requirements.name,
+        description: requirements.product_description || requirements.description,
         channel: requirements.channel,
         category: requirements.category,
-        owner: requirements.owner,
+        owner: requirements.product_owner || requirements.owner,
         schedule: requirements.schedule,
         sql: generateResult.sql,
         logic_summary: generateResult.logic_summary,
         tags: [
           requirements.channel,
           requirements.category,
+          requirements.vz_service_type,
+          requirements.intended_purpose,
         ].filter(Boolean),
       });
       setSaved(true);
@@ -168,8 +256,8 @@ export default function MessageCodeBuilderPage() {
           Message Code Builder
         </h1>
         <p className="text-sm text-text-muted mt-1">
-          Define requirements, pick a template, generate SQL + DAG, and build
-          your knowledge base
+          CDAE Message/Audience Code Request Form — define requirements, pick a
+          template, generate SQL + DAG
         </p>
       </div>
 
@@ -188,7 +276,6 @@ export default function MessageCodeBuilderPage() {
             )}
             <button
               onClick={() => {
-                // Allow going back to previous steps
                 const currentIdx = STEPS.findIndex((x) => x.id === step);
                 const targetIdx = STEPS.findIndex((x) => x.id === s.id);
                 if (targetIdx <= currentIdx) setStep(s.id);
@@ -248,6 +335,10 @@ export default function MessageCodeBuilderPage() {
           onChange={setRequirements}
           onSubmit={handleAnalyze}
           loading={analyzeLoading}
+          demoPresets={demoPresets}
+          onLoadDemo={handleLoadDemo}
+          demoMode={demoMode}
+          onToggleDemo={setDemoMode}
         />
       )}
 

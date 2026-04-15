@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
-from agents.message_code_builder import MessageCodeBuilderAgent
+from agents.message_code_builder import MessageCodeBuilderAgent, DEMO_PRESETS
 from models.schemas import (
     MessageCodeGenerateRequest,
     MessageCodeRequirements,
@@ -80,6 +80,12 @@ async def generate_dag(request: MessageCodeRequirements):
         activity_log[:] = activity_log[-50:]
 
     return result
+
+
+@router.get("/api/agents/message-code-builder/demo-presets")
+async def get_demo_presets():
+    """Return demo preset data for auto-populating the form during demos."""
+    return {"presets": DEMO_PRESETS}
 
 
 @router.post("/api/agents/message-code-builder/save")
