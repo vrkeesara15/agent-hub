@@ -361,6 +361,7 @@ export default function MessageCodeBuilderPage() {
           dagLoading={dagLoading}
           saveLoading={saveLoading}
           saved={saved}
+          messageCode={requirements.message_code || requirements.message_codes.split(',')[0]?.trim() || 'message_code'}
         />
       )}
     </div>
